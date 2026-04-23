@@ -5,7 +5,7 @@
  * Drop-in replacement for YAMM. Paste this file in Extensions → Apps Script.
  *
  * Setup:
- *   1. Edit the 4 constants below (SHEET_NAME, FROM_NAME, REPLY_TO, TEST_EMAIL_DEFAULT).
+ *   1. Edit the 3 constants below (FROM_NAME, REPLY_TO, TEST_EMAIL_DEFAULT).
  *   2. Save (Cmd+S). Reload the Sheet.
  *   3. Menu "Free Mail Merge" appears.
  *
@@ -18,17 +18,20 @@
  * Repo: https://github.com/diegotorreslopez81/free-mail-merge
  */
 
-// ----- EDIT THESE 4 CONSTANTS BEFORE USING -----
-const SHEET_NAME = "Leads";                         // name of the tab with your leads
+// ----- EDIT THESE 3 CONSTANTS BEFORE USING -----
 const FROM_NAME = "Your Name · Your Company";       // display name in recipient's inbox
 const REPLY_TO = "you@yourdomain.com";              // Reply-To + From alias (must be a Send-As alias if different from login)
 const TEST_EMAIL_DEFAULT = "you@yourdomain.com";    // default destination for "Send test"
 // -----------------------------------------------
+// NOTE: the leads tab is chosen from the menu ("🗂  Pick leads sheet"), not hardcoded.
+//       If nothing is picked, the script falls back to SHEET_NAME_FALLBACK below.
+const SHEET_NAME_FALLBACK = "Leads";
 
 const BATCH_SIZE_DEFAULT = 30;          // default batch size (Apps Script has a 6-min timeout)
 const DELAY_MIN_MS = 5000;              // 5 s
 const DELAY_MAX_MS = 15000;             // 15 s (keep short to stay under the script limit)
 const PROP_DRAFT_ID = "TEMPLATE_DRAFT_ID";
+const PROP_SHEET_ID = "LEADS_SHEET_ID";
 const PROP_SCHEDULE_LIMIT = "SCHEDULE_LIMIT";
 const PROP_SCHEDULE_DAILY_LIMIT = "SCHEDULE_DAILY_LIMIT";
 
@@ -45,8 +48,9 @@ const COL = {
 
 function onOpen() {
   SpreadsheetApp.getUi().createMenu("Free Mail Merge")
+    .addItem("🗂  Pick leads sheet", "chooseSheet")
     .addItem("🎯 Pick template draft", "chooseTemplate")
-    .addItem("ℹ️  Show current template", "showTemplate")
+    .addItem("ℹ️  Show current config", "showTemplate")
     .addSeparator()
     .addItem("🔍 Dry run (preview 3 in logs)", "dryRun")
     .addItem("📨 Send test email", "sendTest")
@@ -66,6 +70,41 @@ function onOpen() {
     .addItem("↩️  Reset all sends", "resetSent")
     .addItem("ℹ️  Campaign status", "showStatus")
     .addToUi();
+}
+
+// ---------- Leads sheet selection ----------
+
+function chooseSheet() {
+  const sheets = SpreadsheetApp.getActive().getSheets();
+  const items = sheets.map(function(s) {
+    return { id: s.getSheetId(), label: s.getName() + "  (" + s.getLastRow() + " rows)" };
+  });
+
+  const html = HtmlService.createHtmlOutput(
+    '<div style="font-family:-apple-system,Helvetica,Arial,sans-serif;padding:16px;">' +
+    '<h3 style="margin:0 0 12px 0;">Pick leads sheet</h3>' +
+    '<p style="color:#555;margin:0 0 16px 0;font-size:13px;">Pick the tab with your leads. The script stores the tab ID (not the name), so you can rename it freely afterwards.</p>' +
+    '<select id="sel" style="width:100%;padding:8px;font-size:14px;margin-bottom:16px;">' +
+      items.map(function(it){ return '<option value="' + it.id + '">' + it.label.replace(/"/g, "&quot;").replace(/</g,"&lt;") + '</option>'; }).join("") +
+    '</select>' +
+    '<div style="text-align:right;">' +
+      '<button onclick="google.script.host.close()" style="padding:8px 14px;margin-right:8px;">Cancel</button>' +
+      '<button onclick="save()" style="padding:8px 14px;background:#DA291C;color:white;border:none;border-radius:4px;cursor:pointer;">Save</button>' +
+    '</div>' +
+    '<script>' +
+    'function save() {' +
+    '  const id = document.getElementById("sel").value;' +
+    '  google.script.run.withSuccessHandler(function(){ google.script.host.close(); }).saveLeadsSheet(id);' +
+    '}' +
+    '</script>' +
+    '</div>'
+  ).setWidth(480).setHeight(240);
+  SpreadsheetApp.getUi().showModalDialog(html, "Leads sheet");
+}
+
+function saveLeadsSheet(sheetId) {
+  PropertiesService.getDocumentProperties().setProperty(PROP_SHEET_ID, String(sheetId));
+  return true;
 }
 
 // ---------- Template draft selection ----------
@@ -111,16 +150,26 @@ function saveTemplateDraft(draftId) {
 }
 
 function showTemplate() {
+  const lines = [];
+
+  // Leads sheet
+  const sheet = _getLeadsSheet();
+  lines.push("Leads sheet: " + (sheet ? sheet.getName() + "  (" + (sheet.getLastRow() - 1) + " rows)" : "NOT PICKED — use '🗂 Pick leads sheet'"));
+
+  // Template draft
   const id = PropertiesService.getDocumentProperties().getProperty(PROP_DRAFT_ID);
-  if (!id) { SpreadsheetApp.getUi().alert("No template picked yet. Use 'Pick template draft' first."); return; }
-  try {
-    const m = GmailApp.getDraft(id).getMessage();
-    const subj = m.getSubject();
-    const att = m.getAttachments().length;
-    SpreadsheetApp.getUi().alert("Current template:\n\nSubject: " + subj + "\nAttachments: " + att + "\nDraft ID: " + id);
-  } catch (e) {
-    SpreadsheetApp.getUi().alert("Draft no longer exists. Pick another.");
+  if (!id) {
+    lines.push("Template: NOT PICKED — use '🎯 Pick template draft'");
+  } else {
+    try {
+      const m = GmailApp.getDraft(id).getMessage();
+      lines.push("Template: " + m.getSubject() + "  (" + m.getAttachments().length + " attachments)");
+    } catch (e) {
+      lines.push("Template: draft no longer exists, pick another");
+    }
   }
+
+  SpreadsheetApp.getUi().alert("Current config:\n\n" + lines.join("\n"));
 }
 
 function sendTest() {
@@ -132,7 +181,8 @@ function sendTest() {
   const tmpl = _getTemplateDraft();
   if (!tmpl.ok) { ui.alert(tmpl.error); return; }
 
-  const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAME);
+  const sheet = _getLeadsSheet();
+  if (!sheet) { ui.alert("No leads sheet picked. Use '🗂 Pick leads sheet' first."); return; }
   const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 15).getValues();
   let sample = null;
   for (const row of data) {
@@ -187,8 +237,12 @@ function sendBatchAll() {
 // ---------- Core ----------
 
 function _run(opts) {
-  const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAME);
-  if (!sheet) { SpreadsheetApp.getUi().alert("Tab not found: " + SHEET_NAME); return; }
+  const sheet = _getLeadsSheet();
+  if (!sheet) {
+    const msg = "No leads sheet picked. Use 'Free Mail Merge → 🗂 Pick leads sheet' first.";
+    if (opts.silent) { Logger.log(msg); } else { SpreadsheetApp.getUi().alert(msg); }
+    return;
+  }
 
   const tmpl = _getTemplateDraft();
   if (!tmpl.ok) { SpreadsheetApp.getUi().alert(tmpl.error); return; }
@@ -259,6 +313,19 @@ function _run(opts) {
   }
 }
 
+function _getLeadsSheet() {
+  const ss = SpreadsheetApp.getActive();
+  const savedId = PropertiesService.getDocumentProperties().getProperty(PROP_SHEET_ID);
+  if (savedId) {
+    const match = ss.getSheets().find(function(s) { return String(s.getSheetId()) === String(savedId); });
+    if (match) return match;
+  }
+  // Fallback: try the constant name (for brand-new installs)
+  const byName = ss.getSheetByName(SHEET_NAME_FALLBACK);
+  if (byName) return byName;
+  return null;
+}
+
 function _getTemplateDraft() {
   const id = PropertiesService.getDocumentProperties().getProperty(PROP_DRAFT_ID);
   if (!id) {
@@ -295,7 +362,8 @@ function resetSent() {
   const ui = SpreadsheetApp.getUi();
   const r = ui.alert("Reset all sends", "Clear sent_at/sent_status/error for ALL leads? Next batch will resend them.", ui.ButtonSet.YES_NO);
   if (r !== ui.Button.YES) return;
-  const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAME);
+  const sheet = _getLeadsSheet();
+  if (!sheet) { ui.alert("No leads sheet picked."); return; }
   const lastRow = sheet.getLastRow();
   if (lastRow > 1) {
     sheet.getRange(2, COL.sent_at, lastRow - 1, 3).clearContent();
@@ -304,7 +372,8 @@ function resetSent() {
 }
 
 function showStatus() {
-  const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAME);
+  const sheet = _getLeadsSheet();
+  if (!sheet) { SpreadsheetApp.getUi().alert("No leads sheet picked."); return; }
   const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 15).getValues();
   let total = 0, sent = 0, err = 0, pending = 0, lkPending = 0, noLKPending = 0;
   for (const row of data) {
@@ -442,8 +511,8 @@ function _parseScheduleDate(s) {
 // ---------- Reply tracking ----------
 
 function checkReplies() {
-  const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAME);
-  if (!sheet) { SpreadsheetApp.getUi().alert("Tab not found: " + SHEET_NAME); return; }
+  const sheet = _getLeadsSheet();
+  if (!sheet) { SpreadsheetApp.getUi().alert("No leads sheet picked."); return; }
 
   // Make sure the replied_at header exists in column 16
   const header = sheet.getRange(1, COL.replied_at).getValue();

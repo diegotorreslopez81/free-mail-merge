@@ -39,14 +39,16 @@ YAMM charges €60/year for anything beyond 20 emails/day. I needed to send 450 
 4. Edit these four constants at the top to match your setup:
 
 ```javascript
-const SHEET_NAME = "Leads";                                  // name of your leads tab
 const FROM_NAME = "Your Name · Your Company";                // display name
 const REPLY_TO = "you@yourdomain.com";                       // reply-to + from alias
 const TEST_EMAIL_DEFAULT = "you@yourdomain.com";             // where test mails go
 ```
 
+(The leads tab itself is picked from the menu, not hardcoded, so you can rename the tab anytime.)
+
 5. Save (Cmd+S). Give the project any name (we use "Free Mail Merge").
 6. Reload the Sheet (Cmd+R). A new menu **"Free Mail Merge"** appears.
+7. First run: menu **Free Mail Merge → 🗂 Pick leads sheet** and select the tab with your leads.
 
 ## Sheet layout
 
