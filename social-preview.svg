@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+  <rect width="1280" height="640" fill="#0A0A0F"/>
+
+  <!-- envelope icon (left) -->
+  <g transform="translate(120, 180)">
+    <rect width="280" height="280" rx="56" fill="#DA291C"/>
+    <g fill="none" stroke="white" stroke-width="18" stroke-linejoin="round" stroke-linecap="round">
+      <rect x="56" y="84" width="168" height="112" rx="10"/>
+      <path d="M56 96 L140 160 L224 96"/>
+    </g>
+  </g>
+
+  <!-- Text right -->
+  <g transform="translate(480, 240)">
+    <text x="0" y="0" fill="white" font-family="-apple-system, Helvetica, Arial, sans-serif" font-size="88" font-weight="800" letter-spacing="-2">Free Mail Merge</text>
+    <text x="0" y="72" fill="#9CA3AF" font-family="-apple-system, Helvetica, Arial, sans-serif" font-size="34" font-weight="400">Unlimited YAMM alternative.</text>
+    <text x="0" y="120" fill="#9CA3AF" font-family="-apple-system, Helvetica, Arial, sans-serif" font-size="34" font-weight="400">Google Sheets + Gmail. MIT.</text>
+    <text x="0" y="196" fill="#10B981" font-family="-apple-system, Helvetica, Arial, sans-serif" font-size="26" font-weight="600">Built in 15 minutes with Claude.</text>
+  </g>
+</svg>

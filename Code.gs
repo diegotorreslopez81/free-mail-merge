@@ -47,7 +47,7 @@ const COL = {
 
 
 function onOpen() {
-  SpreadsheetApp.getUi().createMenu("Free Mail Merge")
+  SpreadsheetApp.getUi().createMenu("✉️ Free Mail Merge")
     .addItem("🗂  Pick leads sheet", "chooseSheet")
     .addItem("🎯 Pick template draft", "chooseTemplate")
     .addItem("ℹ️  Show current config", "showTemplate")

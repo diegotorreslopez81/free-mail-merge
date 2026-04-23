@@ -1,6 +1,13 @@
-# Free Mail Merge
+<p align="center">
+  <img src="logo.svg" width="128" height="128" alt="Free Mail Merge logo">
+</p>
 
-> A free, unlimited mail merge for Google Sheets + Gmail. Drop-in replacement for YAMM. **Built in 15 minutes with Claude, zero lines of code hand-written.**
+<h1 align="center">Free Mail Merge</h1>
+
+<p align="center">
+  A free, unlimited mail merge for Google Sheets + Gmail.<br>
+  Drop-in replacement for YAMM. <strong>Built in 15 minutes with Claude, zero lines of code hand-written.</strong>
+</p>
 
 ![Built with Claude](https://img.shields.io/badge/Built%20with-Claude-DA291C)
 ![License](https://img.shields.io/badge/license-MIT-blue)
