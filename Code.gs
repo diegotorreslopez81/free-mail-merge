@@ -42,16 +42,33 @@ const PROP_SCHEDULE_LIMIT = "SCHEDULE_LIMIT";
 const PROP_SCHEDULE_DAILY_LIMIT = "SCHEDULE_DAILY_LIMIT";
 const PROP_SCHED_META_PREFIX = "SCHED_META_";       // per-trigger metadata
 
-// Status-column indexes (1-based). The rest of the columns are whatever the user has
-// in their leads tab and are auto-discovered from row 1 for placeholder replacement.
+const SUPPRESSION_TAB_NAME = "_Suppression";        // auto-generated unsubscribe list
+
+// Status-column indexes (1-based). Everything up to column L is whatever the user has
+// in their leads tab (auto-discovered from row 1 for placeholder replacement).
 const COL = {
-  email: 1,           // column A must be email
-  lk_contacted: 12,   // optional column L (YES/NO) used by "skip LK-contacted"
+  email: 1,            // column A must be email
+  lk_contacted: 12,    // optional column L (YES/NO) used by "skip LK-contacted"
   sent_at: 13,
   sent_status: 14,
   error: 15,
-  replied_at: 16
+  replied_at: 16,
+  opened_at: 17,
+  clicked_at: 18,
+  unsubscribed_at: 19,
+  bounced_at: 20
 };
+
+const TRACKING_HEADERS = [
+  { col: 13, name: "sent_at" },
+  { col: 14, name: "sent_status" },
+  { col: 15, name: "error" },
+  { col: 16, name: "replied_at" },
+  { col: 17, name: "opened_at" },
+  { col: 18, name: "clicked_at" },
+  { col: 19, name: "unsubscribed_at" },
+  { col: 20, name: "bounced_at" }
+];
 
 // ---------- Menu ----------
 
@@ -77,6 +94,11 @@ function onOpen() {
       .addItem("🗑️  Cancel all scheduled jobs", "cancelSchedules"))
     .addSeparator()
     .addItem("💬 Check replies", "checkReplies")
+    .addItem("📬 Check bounces", "checkBounces")
+    .addSeparator()
+    .addSubMenu(SpreadsheetApp.getUi().createMenu("🔗 Tracking")
+      .addItem("🌐 Setup web app (once)", "showWebAppSetup")
+      .addItem("📊 Tracking status", "showTrackingStatus"))
     .addSeparator()
     .addItem("↩️  Reset all sends", "resetSent")
     .addItem("🧹 Reset only errored rows", "resetErrors")
@@ -283,15 +305,20 @@ function sendTest() {
   const merged = _mergeTemplate(tmpl.data, vars);
   const fromName = _getSetting(PROP_FROM_NAME, FROM_NAME);
   const replyTo = _getSetting(PROP_REPLY_TO, REPLY_TO);
+  const webAppUrl = _getWebAppUrl();
+  const injected = _injectTracking(merged.htmlBody, merged.plainBody, testEmail.toLowerCase(), webAppUrl);
   try {
-    GmailApp.sendEmail(testEmail, "[TEST] " + merged.subject, merged.plainBody, {
-      htmlBody: merged.htmlBody,
+    GmailApp.sendEmail(testEmail, "[TEST] " + merged.subject, injected.plain, {
+      htmlBody: injected.html,
       attachments: tmpl.data.attachments,
       name: fromName,
       from: replyTo,
       replyTo: replyTo,
     });
-    ui.alert("✅ Test sent to " + testEmail + "\n\nFrom alias: " + replyTo + "\n\nVerify: HTML signature, attachment, placeholders all replaced, links clickable.");
+    const trackNote = webAppUrl
+      ? "\n\nTracking is active. Open the email, click a link, try the unsubscribe — then run '📊 Tracking status'."
+      : "\n\n⚠️  Web app not deployed. This test went out WITHOUT tracking.";
+    ui.alert("✅ Test sent to " + testEmail + "\n\nFrom alias: " + replyTo + "\n\nVerify: HTML signature, attachment, placeholders all replaced, links clickable." + trackNote);
   } catch (e) {
     ui.alert("❌ Error: " + e + "\n\nCommon causes: the alias '" + replyTo + "' isn't configured as 'Send mail as' in Gmail Settings → Accounts.");
   }
@@ -347,9 +374,16 @@ function _run(opts) {
 
   const fromName = _getSetting(PROP_FROM_NAME, FROM_NAME);
   const replyTo = _getSetting(PROP_REPLY_TO, REPLY_TO);
+  const webAppUrl = _getWebAppUrl();
+
+  if (!opts.dryRun) {
+    _ensureTrackingHeaders(sheet);
+    _ensureSuppressionTab();
+  }
 
   let sent = 0;
   let skipped_quota = false;
+  let skipped_suppressed = 0;
   const errors = [];
 
   // Quota awareness: stop before we get pushed off the cliff.
@@ -366,6 +400,7 @@ function _run(opts) {
     if (!email || !email.includes("@")) continue;
     if (alreadySent) continue;
     if (opts.skipLK && lkContacted === "YES") continue;
+    if (_isSuppressed(email)) { skipped_suppressed++; continue; }
 
     if (!opts.dryRun && remaining <= QUOTA_SAFETY_MARGIN) {
       skipped_quota = true;
@@ -375,15 +410,19 @@ function _run(opts) {
     const vars = _buildVars(headers, row);
     const merged = _mergeTemplate(tmpl.data, vars);
 
+    // Inject tracking (pixel + link wrapping + unsubscribe footer). Skipped if
+    // no Web App URL is available.
+    const injected = _injectTracking(merged.htmlBody, merged.plainBody, email.toLowerCase(), webAppUrl);
+
     if (opts.dryRun) {
       Logger.log("=== DRY RUN [" + (sent + 1) + "] ===");
       Logger.log("To: " + email);
       Logger.log("Subject: " + merged.subject);
-      Logger.log(merged.plainBody.substring(0, 600) + "...\n");
+      Logger.log(injected.plain.substring(0, 600) + "...\n");
     } else {
       try {
-        GmailApp.sendEmail(email, merged.subject, merged.plainBody, {
-          htmlBody: merged.htmlBody,
+        GmailApp.sendEmail(email, merged.subject, injected.plain, {
+          htmlBody: injected.html,
           attachments: tmpl.data.attachments,
           name: fromName,
           from: replyTo,
@@ -412,7 +451,9 @@ function _run(opts) {
   } else {
     msg = "Sent: " + sent;
     if (errors.length) msg += "\nErrors: " + errors.length + " (see 'error' column)";
+    if (skipped_suppressed) msg += "\nSkipped (suppression list): " + skipped_suppressed;
     if (skipped_quota) msg += "\n\n⚠️ Stopped early: Gmail daily quota reached (" + QUOTA_SAFETY_MARGIN + " slot safety margin). Remaining: " + remaining + ".";
+    if (!webAppUrl) msg += "\n\nℹ️  Web app not deployed. Emails went out WITHOUT tracking (no pixel, no unsubscribe link).";
   }
   if (opts.silent) { Logger.log(msg); } else { SpreadsheetApp.getUi().alert(msg); }
 }
@@ -768,6 +809,281 @@ function refreshScheduleTab() {
     const protection = tab.protect().setDescription("Auto-managed by Free Mail Merge");
     protection.setWarningOnly(true);
   } catch (e) { /* ignore in contexts where protect isn't allowed */ }
+}
+
+// ============================================================================
+// TRACKING (opens, clicks, unsubscribe, bounces) — requires Web App deployment
+// ============================================================================
+
+// ---------- Web App endpoint ----------
+// Apps Script calls doGet(e) when the deployed Web App URL is hit.
+// We dispatch by ?t= parameter: open | click | unsub.
+function doGet(e) {
+  const params = e && e.parameter ? e.parameter : {};
+  const t = params.t || "";
+  const recipient = (params.r || "").toLowerCase().trim();
+
+  try {
+    if (t === "open") {
+      _trackEvent(recipient, COL.opened_at, "");
+      return _transparentPixel();
+    }
+    if (t === "click") {
+      const url = params.u || "";
+      _trackEvent(recipient, COL.clicked_at, url);
+      return _redirect(url);
+    }
+    if (t === "unsub") {
+      _trackEvent(recipient, COL.unsubscribed_at, "unsubscribed");
+      _addToSuppression(recipient, "user-unsubscribe");
+      return _unsubConfirmation(recipient);
+    }
+  } catch (err) {
+    Logger.log("doGet error: " + err);
+  }
+  return HtmlService.createHtmlOutput("<p>Free Mail Merge tracking endpoint.</p>").setTitle("Free Mail Merge");
+}
+
+function _transparentPixel() {
+  // Apps Script can't return raw binary; email clients don't mind receiving
+  // empty text content as long as the HTTP 200 fires — the pixel is a tracking
+  // beacon, not a visible graphic. Hidden by width:1/height:1/display:none.
+  return ContentService.createTextOutput("").setMimeType(ContentService.MimeType.TEXT);
+}
+
+function _redirect(url) {
+  if (!url || !/^https?:\/\//i.test(url)) {
+    return HtmlService.createHtmlOutput("<p>Invalid URL.</p>");
+  }
+  const safe = url.replace(/"/g, "&quot;");
+  const html = '<!doctype html><html><head><meta http-equiv="refresh" content="0;url=' + safe + '"><title>Redirecting...</title></head>' +
+    '<body><p>Redirecting to <a href="' + safe + '">' + safe + '</a>...</p>' +
+    '<script>window.location.replace("' + safe + '");</script></body></html>';
+  return HtmlService.createHtmlOutput(html);
+}
+
+function _unsubConfirmation(email) {
+  const safe = (email || "").replace(/</g, "&lt;");
+  const html = '<!doctype html><html><head><title>Unsubscribed</title></head>' +
+    '<body style="font-family:-apple-system,Helvetica,Arial,sans-serif;max-width:520px;margin:80px auto;padding:24px;color:#222;">' +
+    '<h2 style="margin:0 0 12px 0;">✅ Unsubscribed</h2>' +
+    '<p>The address <strong>' + safe + '</strong> has been added to our suppression list. You will not receive further emails from this campaign.</p>' +
+    '<p style="color:#888;font-size:13px;margin-top:32px;">If this was a mistake, reply to any previous email and we\'ll restore you.</p>' +
+    '</body></html>';
+  return HtmlService.createHtmlOutput(html);
+}
+
+// ---------- Tracking helpers ----------
+
+function _getWebAppUrl() {
+  try {
+    const url = ScriptApp.getService().getUrl();
+    return url || "";
+  } catch (e) { return ""; }
+}
+
+function _trackEvent(recipient, colIndex, value) {
+  if (!recipient) return;
+  const sheet = _getLeadsSheet();
+  if (!sheet) return;
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  _ensureTrackingHeaders(sheet);
+  const emails = sheet.getRange(2, COL.email, lastRow - 1, 1).getValues();
+  for (let i = 0; i < emails.length; i++) {
+    const rowEmail = String(emails[i][0] || "").toLowerCase().trim();
+    if (rowEmail && rowEmail === recipient) {
+      const sheetRow = i + 2;
+      const cur = sheet.getRange(sheetRow, colIndex).getValue();
+      const ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm");
+      // Write timestamp (first event wins for opens/clicks; always overwrite for unsub)
+      if (!cur || colIndex === COL.unsubscribed_at) {
+        sheet.getRange(sheetRow, colIndex).setValue(ts + (value ? "  |  " + value : ""));
+      } else if (colIndex === COL.clicked_at && value) {
+        // Click: append new URL to the cell if different
+        const s = String(cur);
+        if (s.indexOf(value) === -1) sheet.getRange(sheetRow, colIndex).setValue(s + "\n" + ts + "  |  " + value);
+      }
+      return;
+    }
+  }
+}
+
+function _ensureTrackingHeaders(sheet) {
+  for (const h of TRACKING_HEADERS) {
+    const cur = sheet.getRange(1, h.col).getValue();
+    if (!cur) sheet.getRange(1, h.col).setValue(h.name);
+  }
+}
+
+function _injectTracking(htmlBody, plainBody, recipient, webAppUrl) {
+  if (!webAppUrl) return { html: htmlBody, plain: plainBody };
+
+  const encR = encodeURIComponent(recipient);
+  // 1) Wrap <a href=""> links (skip mailto/tel/#anchor and our own web app)
+  const html1 = (htmlBody || "").replace(/<a\s+([^>]*?)href=(["'])([^"']+)\2([^>]*)>/gi, function(match, pre, q, url, post) {
+    if (/^mailto:|^tel:|^#|^javascript:/i.test(url)) return match;
+    if (url.indexOf(webAppUrl) === 0) return match;
+    const wrapped = webAppUrl + "?t=click&r=" + encR + "&u=" + encodeURIComponent(url);
+    return "<a " + pre + "href=" + q + wrapped + q + post + ">";
+  });
+
+  // 2) Open-pixel at the end of body (or of html if no body tag)
+  const pixel = '<img src="' + webAppUrl + '?t=open&r=' + encR + '" width="1" height="1" alt="" border="0" style="display:block;width:1px;height:1px;border:0;" />';
+  const html2 = /<\/body>/i.test(html1) ? html1.replace(/<\/body>/i, pixel + "</body>") : (html1 + pixel);
+
+  // 3) Unsubscribe footer
+  const unsubUrl = webAppUrl + "?t=unsub&r=" + encR;
+  const footer = '<p style="color:#999;font-size:11px;margin-top:40px;border-top:1px solid #eee;padding-top:12px;">' +
+    'Don\'t want to hear from us? <a href="' + unsubUrl + '" style="color:#999;">Unsubscribe here</a>.' +
+    '</p>';
+  const html3 = /<\/body>/i.test(html2) ? html2.replace(/<\/body>/i, footer + "</body>") : (html2 + footer);
+
+  const plain = (plainBody || "") + "\n\n---\nUnsubscribe: " + unsubUrl;
+  return { html: html3, plain: plain };
+}
+
+// ---------- Suppression list ----------
+
+function _ensureSuppressionTab() {
+  const ss = SpreadsheetApp.getActive();
+  let tab = ss.getSheetByName(SUPPRESSION_TAB_NAME);
+  if (!tab) {
+    tab = ss.insertSheet(SUPPRESSION_TAB_NAME);
+    tab.setTabColor("#666666");
+    tab.getRange(1, 1, 1, 3).setValues([["email", "unsubscribed_at", "source"]]).setFontWeight("bold").setBackground("#f0f0f0");
+  }
+  return tab;
+}
+
+function _addToSuppression(email, source) {
+  if (!email) return;
+  const tab = _ensureSuppressionTab();
+  // Dedup
+  const lastRow = tab.getLastRow();
+  if (lastRow > 1) {
+    const existing = tab.getRange(2, 1, lastRow - 1, 1).getValues();
+    for (const row of existing) {
+      if (String(row[0] || "").toLowerCase().trim() === email.toLowerCase().trim()) return;
+    }
+  }
+  const ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm");
+  tab.appendRow([email.toLowerCase().trim(), ts, source || ""]);
+}
+
+function _isSuppressed(email) {
+  if (!email) return false;
+  const ss = SpreadsheetApp.getActive();
+  const tab = ss.getSheetByName(SUPPRESSION_TAB_NAME);
+  if (!tab) return false;
+  const lastRow = tab.getLastRow();
+  if (lastRow < 2) return false;
+  const emails = tab.getRange(2, 1, lastRow - 1, 1).getValues();
+  const target = email.toLowerCase().trim();
+  for (const row of emails) {
+    if (String(row[0] || "").toLowerCase().trim() === target) return true;
+  }
+  return false;
+}
+
+// ---------- Bounces ----------
+
+function checkBounces() {
+  const sheet = _getLeadsSheet();
+  if (!sheet) { SpreadsheetApp.getUi().alert("No leads sheet picked."); return; }
+  _ensureTrackingHeaders(sheet);
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) { SpreadsheetApp.getUi().alert("No leads."); return; }
+
+  // Build lookup of leads (lowercased)
+  const all = sheet.getRange(2, 1, lastRow - 1, COL.bounced_at).getValues();
+  const emailToRow = {};
+  for (let i = 0; i < all.length; i++) {
+    const e = String(all[i][0] || "").toLowerCase().trim();
+    const bounced = all[i][COL.bounced_at - 1];
+    if (e && !bounced) emailToRow[e] = i + 2;
+  }
+
+  const threads = GmailApp.search("from:(mailer-daemon OR postmaster) in:inbox newer_than:30d");
+  let marked = 0;
+
+  for (const t of threads) {
+    for (const m of t.getMessages()) {
+      const body = (m.getPlainBody() || "");
+      const found = body.match(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi) || [];
+      for (const candidate of found) {
+        const key = candidate.toLowerCase();
+        if (emailToRow[key]) {
+          const row = emailToRow[key];
+          const ts = Utilities.formatDate(m.getDate(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm");
+          sheet.getRange(row, COL.bounced_at).setValue(ts);
+          _addToSuppression(key, "bounce");
+          delete emailToRow[key];
+          marked++;
+          break;
+        }
+      }
+    }
+  }
+  SpreadsheetApp.getUi().alert("Bounces detected: " + marked + "\n" +
+    (marked ? "Marked in 'bounced_at' column and added to suppression list." : "Inbox scanned, no unseen bounces match your leads."));
+}
+
+// ---------- Web App UX ----------
+
+function showWebAppSetup() {
+  const existing = _getWebAppUrl();
+  const html = HtmlService.createHtmlOutput(
+    '<div style="font-family:-apple-system,Helvetica,Arial,sans-serif;padding:20px;color:#222;max-width:560px;">' +
+    '<h2 style="margin:0 0 8px 0;">🌐 Deploy tracking web app</h2>' +
+    '<p style="color:#666;margin:0 0 16px 0;font-size:13px;">Tracking (opens, clicks, unsubscribe) needs a public URL that your emails can call. Apps Script gives you one when you deploy this script as a Web App. Takes 30 seconds, done once.</p>' +
+    '<ol style="line-height:1.6;font-size:14px;">' +
+    '<li>Open <strong>Extensions → Apps Script</strong>.</li>' +
+    '<li>Click <strong>Deploy → New deployment</strong>.</li>' +
+    '<li>Gear icon (⚙️) → pick <strong>Web app</strong>.</li>' +
+    '<li>Description: <em>Free Mail Merge tracker</em>.</li>' +
+    '<li>Execute as: <strong>Me</strong>.</li>' +
+    '<li>Who has access: <strong>Anyone</strong>. (Required so recipients\' email clients can load the pixel.)</li>' +
+    '<li>Click <strong>Deploy</strong> and authorize.</li>' +
+    '<li>Copy the URL. Come back and reload this Sheet.</li>' +
+    '</ol>' +
+    '<p style="margin:16px 0 0 0;font-size:13px;color:' + (existing ? '#10B981' : '#DA291C') + ';"><strong>' +
+    (existing ? '✅ Currently deployed: ' + existing : '⚠️ No web app detected yet.') +
+    '</strong></p>' +
+    '<div style="text-align:right;margin-top:20px;">' +
+    '<button onclick="google.script.host.close()" style="padding:8px 14px;background:#DA291C;color:white;border:none;border-radius:4px;cursor:pointer;">Got it</button>' +
+    '</div>' +
+    '</div>'
+  ).setWidth(600).setHeight(520);
+  SpreadsheetApp.getUi().showModalDialog(html, "Setup tracking");
+}
+
+function showTrackingStatus() {
+  const url = _getWebAppUrl();
+  const lines = [];
+  if (url) {
+    lines.push("✅ Web app deployed");
+    lines.push("URL: " + url);
+    lines.push("");
+    lines.push("Active tracking:");
+    lines.push("  • Opens   → column " + COL.opened_at + " (opened_at)");
+    lines.push("  • Clicks  → column " + COL.clicked_at + " (clicked_at)");
+    lines.push("  • Unsub   → column " + COL.unsubscribed_at + " (unsubscribed_at) + _Suppression tab");
+    lines.push("  • Bounces → column " + COL.bounced_at + " (bounced_at) — run 'Check bounces' manually");
+  } else {
+    lines.push("⚠️  Web app NOT deployed.");
+    lines.push("");
+    lines.push("Tracking is disabled. Emails will be sent without pixel / link wrapping / unsubscribe link.");
+    lines.push("");
+    lines.push("To enable: menu → 🔗 Tracking → 🌐 Setup web app (once).");
+  }
+
+  const supTab = SpreadsheetApp.getActive().getSheetByName(SUPPRESSION_TAB_NAME);
+  lines.push("");
+  lines.push("Suppression list: " + (supTab ? Math.max(0, supTab.getLastRow() - 1) + " addresses" : "0 addresses (tab not yet created)"));
+
+  SpreadsheetApp.getUi().alert("Tracking status\n\n" + lines.join("\n"));
 }
 
 // ---------- Reply tracking ----------

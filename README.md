@@ -28,8 +28,9 @@ A Google Apps Script you paste into your spreadsheet. It turns any Google Sheet 
 - **Schedule batches** to fire at a specific date/time or every day at a fixed hour.
 - **Runs server-side on Google's infra.** Scheduled batches fire with your laptop closed, Chrome killed, you offline. Zero local dependency.
 - **Visible schedule tab** (`_Schedule`, read-only): see what's queued, when it fires next, batch size. Auto-refreshed.
-- **Track replies** automatically: one click scans your inbox and fills a `replied_at` column.
-- Status tracked in the sheet itself: `sent_at`, `sent_status`, `error`, `replied_at`.
+- **Track everything per lead** (opt-in, one-time Web App deploy): `opened_at`, `clicked_at` (with URL), `unsubscribed_at`, `bounced_at`, plus `replied_at`.
+- **Automatic unsubscribe link** in every email (GDPR-friendly). Unsubscribed addresses land in a `_Suppression` tab and are skipped on future sends.
+- Status tracked in the sheet itself: `sent_at`, `sent_status`, `error`, `replied_at`, `opened_at`, `clicked_at`, `unsubscribed_at`, `bounced_at`.
 - Resume where it left off if execution is interrupted.
 - Use a Gmail alias as the `From:` address.
 
@@ -140,9 +141,31 @@ Caveats:
 
 Scheduled batches always skip LK-contacted rows and use the currently selected template.
 
-### 7. Track replies
+### 7. Track replies and bounces
 
-Menu **Free Mail Merge → 💬 Check replies**: scans your Gmail inbox from the last 14 days, matches sender addresses against the `email` column, and fills a `replied_at` timestamp in column P for each match. Skips rows where `replied_at` is already set. Run it manually whenever you want, or add a time-based trigger in the Apps Script editor (e.g., every 30 minutes) for near-real-time reply tracking.
+- Menu **Free Mail Merge → 💬 Check replies**: scans your Gmail inbox from the last 14 days, matches sender addresses against the `email` column, and fills a `replied_at` timestamp in column P for each match.
+- Menu **Free Mail Merge → 📬 Check bounces**: scans for `mailer-daemon` / `postmaster` bounce notifications and marks `bounced_at`. Bounced addresses are auto-added to the `_Suppression` tab so you won't re-email them.
+- Both are idempotent. Run them manually or add a time-based trigger in the Apps Script editor (e.g., every 30 minutes) for near-real-time updates.
+
+### 8. Track opens, clicks and unsubscribes
+
+This requires deploying the script as an Apps Script Web App, once. Takes 30 seconds.
+
+1. Menu **Free Mail Merge → 🔗 Tracking → 🌐 Setup web app (once)** for the step-by-step modal.
+2. In the Apps Script editor: **Deploy → New deployment → Web app**.
+3. Description: "Free Mail Merge tracker". Execute as: **Me**. Access: **Anyone**.
+4. Click **Deploy**, authorize, copy the URL.
+5. Reload the Sheet. Tracking is active from the next send.
+
+Once deployed:
+- Every sent email carries an invisible `1x1` pixel that logs `opened_at` on first view.
+- Every `<a href>` in the body is wrapped so clicks are logged (`clicked_at`, with the URL) before the recipient is redirected to the real destination.
+- Every email ends with a small "Unsubscribe here" link. One click lands the address in `_Suppression` and stamps `unsubscribed_at`. Future batches skip suppressed addresses automatically.
+- Menu **🔗 Tracking → 📊 Tracking status** shows whether the web app is deployed, the URL, and current suppression-list size.
+
+Caveats:
+- Gmail caches pixel loads via the Google Image Proxy. You'll see the first open; subsequent opens from the same client may be deduplicated.
+- Web App URL needs `Access: Anyone` so recipients' email clients can hit it without being logged in to your Google account. Google's console will show you this as a security warning, approve it — the URL is an obscure UUID and only logs hits.
 
 ## Configuration reference
 
