@@ -38,17 +38,17 @@ const PROP_SHEET_ID = "LEADS_SHEET_ID";
 const PROP_FROM_NAME = "SETTING_FROM_NAME";
 const PROP_REPLY_TO = "SETTING_REPLY_TO";
 const PROP_TEST_EMAIL = "SETTING_TEST_EMAIL";
+const PROP_INJECT_UNSUB = "SETTING_INJECT_UNSUB";  // "1" = on, "0" = off. Default on.
 const PROP_SCHEDULE_LIMIT = "SCHEDULE_LIMIT";
 const PROP_SCHEDULE_DAILY_LIMIT = "SCHEDULE_DAILY_LIMIT";
 const PROP_SCHED_META_PREFIX = "SCHED_META_";       // per-trigger metadata
 
 const SUPPRESSION_TAB_NAME = "_Suppression";        // auto-generated unsubscribe list
 
-// Status-column indexes (1-based). Everything up to column L is whatever the user has
-// in their leads tab (auto-discovered from row 1 for placeholder replacement).
+// Column layout. Columns A-L are user lead data (auto-discovered from the row 1
+// headers for placeholder replacement). Columns M-T are auto-written by the script.
 const COL = {
   email: 1,            // column A must be email
-  lk_contacted: 12,    // optional column L (YES/NO) used by "skip LK-contacted"
   sent_at: 13,
   sent_status: 14,
   error: 15,
@@ -117,6 +117,7 @@ function openSettings() {
   const fromName = _getSetting(PROP_FROM_NAME, FROM_NAME);
   const replyTo = _getSetting(PROP_REPLY_TO, REPLY_TO);
   const testEmail = _getSetting(PROP_TEST_EMAIL, TEST_EMAIL_DEFAULT);
+  const injectUnsub = _getSetting(PROP_INJECT_UNSUB, "1") !== "0";
 
   const esc = function(s) { return String(s || "").replace(/"/g, "&quot;").replace(/</g, "&lt;"); };
 
@@ -133,7 +134,14 @@ function openSettings() {
     '<p style="color:#888;margin:0 0 16px 0;font-size:11px;">Must exist as "Send mail as" in Gmail Settings → Accounts if different from the login address.</p>' +
 
     '<label style="display:block;font-size:12px;color:#333;margin-bottom:4px;font-weight:600;">Default test email destination</label>' +
-    '<input id="testEmail" type="email" value="' + esc(testEmail) + '" style="width:100%;padding:8px;font-size:14px;border:1px solid #ccc;border-radius:4px;margin-bottom:20px;box-sizing:border-box;">' +
+    '<input id="testEmail" type="email" value="' + esc(testEmail) + '" style="width:100%;padding:8px;font-size:14px;border:1px solid #ccc;border-radius:4px;margin-bottom:16px;box-sizing:border-box;">' +
+
+    '<label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;color:#333;margin-bottom:4px;cursor:pointer;">' +
+      '<input id="injectUnsub" type="checkbox" ' + (injectUnsub ? "checked" : "") + ' style="margin-top:3px;">' +
+      '<span><strong>Append automatic unsubscribe footer</strong><br>' +
+      '<span style="color:#888;font-size:12px;">Adds "Don\'t want to hear from us? Unsubscribe here" at the end of each email. Turn off if your template already has its own unsubscribe instruction.</span></span>' +
+    '</label>' +
+    '<div style="margin-bottom:20px;"></div>' +
 
     '<div style="text-align:right;">' +
       '<button onclick="google.script.host.close()" style="padding:8px 14px;margin-right:8px;background:#f5f5f5;border:1px solid #ccc;border-radius:4px;cursor:pointer;">Cancel</button>' +
@@ -145,7 +153,8 @@ function openSettings() {
     '  const v = {' +
     '    fromName: document.getElementById("fromName").value,' +
     '    replyTo: document.getElementById("replyTo").value,' +
-    '    testEmail: document.getElementById("testEmail").value' +
+    '    testEmail: document.getElementById("testEmail").value,' +
+    '    injectUnsub: document.getElementById("injectUnsub").checked ? "1" : "0"' +
     '  };' +
     '  google.script.run.withSuccessHandler(function(){ google.script.host.close(); }).saveSettings(v);' +
     '}' +
@@ -160,6 +169,7 @@ function saveSettings(v) {
   if (v && v.fromName !== undefined) props.setProperty(PROP_FROM_NAME, v.fromName);
   if (v && v.replyTo !== undefined) props.setProperty(PROP_REPLY_TO, v.replyTo);
   if (v && v.testEmail !== undefined) props.setProperty(PROP_TEST_EMAIL, v.testEmail);
+  if (v && v.injectUnsub !== undefined) props.setProperty(PROP_INJECT_UNSUB, v.injectUnsub);
   return true;
 }
 
@@ -920,6 +930,8 @@ function _injectTracking(htmlBody, plainBody, recipient, webAppUrl) {
   if (!webAppUrl) return { html: htmlBody, plain: plainBody };
 
   const encR = encodeURIComponent(recipient);
+  const injectUnsub = _getSetting(PROP_INJECT_UNSUB, "1") !== "0";
+
   // 1) Wrap <a href=""> links (skip mailto/tel/#anchor and our own web app)
   const html1 = (htmlBody || "").replace(/<a\s+([^>]*?)href=(["'])([^"']+)\2([^>]*)>/gi, function(match, pre, q, url, post) {
     if (/^mailto:|^tel:|^#|^javascript:/i.test(url)) return match;
@@ -932,14 +944,18 @@ function _injectTracking(htmlBody, plainBody, recipient, webAppUrl) {
   const pixel = '<img src="' + webAppUrl + '?t=open&r=' + encR + '" width="1" height="1" alt="" border="0" style="display:block;width:1px;height:1px;border:0;" />';
   const html2 = /<\/body>/i.test(html1) ? html1.replace(/<\/body>/i, pixel + "</body>") : (html1 + pixel);
 
-  // 3) Unsubscribe footer
-  const unsubUrl = webAppUrl + "?t=unsub&r=" + encR;
-  const footer = '<p style="color:#999;font-size:11px;margin-top:40px;border-top:1px solid #eee;padding-top:12px;">' +
-    'Don\'t want to hear from us? <a href="' + unsubUrl + '" style="color:#999;">Unsubscribe here</a>.' +
-    '</p>';
-  const html3 = /<\/body>/i.test(html2) ? html2.replace(/<\/body>/i, footer + "</body>") : (html2 + footer);
-
-  const plain = (plainBody || "") + "\n\n---\nUnsubscribe: " + unsubUrl;
+  // 3) Unsubscribe footer — only if user hasn't disabled it (e.g. their template
+  //    already carries its own unsubscribe instruction).
+  let html3 = html2;
+  let plain = plainBody || "";
+  if (injectUnsub) {
+    const unsubUrl = webAppUrl + "?t=unsub&r=" + encR;
+    const footer = '<p style="color:#999;font-size:11px;margin-top:40px;border-top:1px solid #eee;padding-top:12px;">' +
+      'Don\'t want to hear from us? <a href="' + unsubUrl + '" style="color:#999;">Unsubscribe here</a>.' +
+      '</p>';
+    html3 = /<\/body>/i.test(html2) ? html2.replace(/<\/body>/i, footer + "</body>") : (html2 + footer);
+    plain = plain + "\n\n---\nUnsubscribe: " + unsubUrl;
+  }
   return { html: html3, plain: plain };
 }
 
