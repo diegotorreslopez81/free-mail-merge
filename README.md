@@ -53,22 +53,22 @@ YAMM charges €60/year for anything beyond 20 emails/day. I needed to send 450 
    - **⚙️ Settings** → enter your From name, alias, and default test email.
    - **🗂 Pick leads sheet** → select the tab with your leads.
    - **🎯 Pick template draft** → select your Gmail draft.
+7. _Optional but recommended:_ **🔗 Tracking → 🌐 Setup web app (once)** to enable opens/clicks/unsubscribe tracking. See [section 8](#8-track-opens-clicks-and-unsubscribes) below.
 
 No code editing needed. Everything is configured from the menu and stored in the spreadsheet.
 
 ## Sheet layout
 
-Your leads tab needs at minimum these columns (in order, starting at A1):
+Your leads tab:
 
-| A | B | C | D | ... | L | M | N | O | P |
-|---|---|---|---|---|---|---|---|---|---|
-| email | first_name | last_name | company | _any merge cols_ | lk_contacted | sent_at | sent_status | error | replied_at |
+| A | B…K | L | M | N | O | P | Q | R | S | T |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **email** | _your lead data_ | lk_contacted | sent_at | sent_status | error | replied_at | opened_at | clicked_at | unsubscribed_at | bounced_at |
 
-- **Columns A-L**: your lead data. Any columns between `company` and `lk_contacted` become merge variables if you reference them as `{{column_name}}` in your draft.
-- **Columns M, N, O, P**: the script writes status here. Leave blank (column P is created automatically the first time you run `Check replies`).
-- **`lk_contacted`** is optional (you can skip it or repurpose it). If present with value `YES`, the option "Send batch (skip LK-contacted)" skips those rows.
-
-If your columns are different, edit the `COL` object at the top of `Code.gs`.
+- **Column A** must be `email`. The rest of your lead columns (B through K) can be whatever you want — each header becomes an auto-detected merge variable. Reference them as `{{column_name}}` in the draft.
+- **Columns M → T** are written by the script. Leave them blank. All eight header names (`sent_at`, `sent_status`, `error`, `replied_at`, `opened_at`, `clicked_at`, `unsubscribed_at`, `bounced_at`) are created automatically the first time the script needs them.
+- **`lk_contacted`** (column L, optional): values `YES`/`NO`. "Send batch (skip LK-contacted)" skips rows marked `YES`. If you don't need this, leave the column blank or repurpose it.
+- **Auto-generated tabs**: `_Schedule` (read-only, shows scheduled jobs) and `_Suppression` (unsubscribed + bounced addresses).
 
 ## Usage
 
@@ -96,7 +96,7 @@ If your columns are different, edit the `COL` object at the top of `Code.gs`.
 ### 3. Send a test to yourself
 
 - **Free Mail Merge → 📨 Send test email**.
-- Prompt asks for a destination email (defaults to `TEST_EMAIL_DEFAULT`).
+- Prompt asks for a destination email (defaults to the address in Settings).
 - Confirm. A real email is sent to you using the first pending lead's data as the merge sample.
 
 Check:
@@ -105,6 +105,7 @@ Check:
 - PDF attachment is included.
 - Placeholders are all replaced (no lingering `{{...}}`).
 - Links work.
+- If tracking is deployed: an "Unsubscribe here" footer is present. Opening the email will stamp `opened_at`, clicking a link stamps `clicked_at`, clicking Unsubscribe stamps `unsubscribed_at` and adds your address to `_Suppression`.
 
 ### 4. Fire the batch
 
@@ -129,8 +130,8 @@ Menu **Free Mail Merge → ⏰ Schedule**:
 
 - **📅 Schedule one-time batch**: prompts for a date/time (`YYYY-MM-DD HH:MM`) and a batch size. Creates an Apps Script trigger that fires once and removes itself.
 - **🔁 Schedule daily batch**: prompts for an hour (0-23) and a daily batch size. Fires every day at that hour until you cancel it. Perfect for a warm-up schedule (50/day → 100/day → 200/day).
-- **📋 List scheduled jobs**: see what's queued.
-- **🗑️ Cancel all scheduled jobs**: remove them all.
+- **📋 Refresh schedule tab**: regenerates the auto-managed `_Schedule` tab. The tab is visible in the sheet and lists every queued job with its next fire time, batch size and trigger ID. It's warning-protected — edits get overwritten on next refresh.
+- **🗑️ Cancel all scheduled jobs**: removes every queued job.
 
 **Fully async — laptop can be closed.** Scheduled triggers run on Google's servers, not in your browser. Set daily 9:00 / 80 emails, close the laptop, go to bed. At 9:00 UTC the trigger fires, logs into Gmail on Google's side, sends the batch, writes status back to the Sheet. You can be offline the whole time. This is the killer feature vs any local script or Python cron on your machine.
 
@@ -169,16 +170,16 @@ Caveats:
 
 ## Configuration reference
 
-Constants at the top of `Code.gs`:
+Most configuration is done from the menu (**⚙️ Settings**, **🗂 Pick leads sheet**, **🎯 Pick template draft**) and stored in the spreadsheet's DocumentProperties. Pasting a new version of `Code.gs` doesn't overwrite your settings.
+
+A few knobs still live at the top of `Code.gs` if you want to tweak them:
 
 | Constant | Default | What it does |
 |---|---|---|
-| `SHEET_NAME` | `"YAMM · ..."` | Name of the tab with your leads. |
-| `FROM_NAME` | display name | Shows next to `From:` in recipient's inbox. |
-| `REPLY_TO` | alias email | Both the `from:` override and `reply-to:`. Must be a Send-As alias in Gmail if different from login address. |
-| `BATCH_SIZE_DEFAULT` | 30 | Default batch size offered in the prompt. |
-| `DELAY_MIN_MS` / `DELAY_MAX_MS` | 5000 / 15000 | Random delay between sends in ms. |
-| `TEST_EMAIL_DEFAULT` | your email | Default destination for the test function. |
+| `BATCH_SIZE_DEFAULT` | `30` | Default batch size suggested in the prompt. |
+| `DELAY_MIN_MS` / `DELAY_MAX_MS` | `5000` / `15000` | Random delay between sends in ms. Keep short so a single trigger fits the 6-min execution cap. |
+| `QUOTA_SAFETY_MARGIN` | `3` | Stop a batch when this many Gmail quota slots remain, instead of crashing at zero. |
+| `FROM_NAME` / `REPLY_TO` / `TEST_EMAIL_DEFAULT` | generic placeholders | Fallback values used when `⚙️ Settings` hasn't been filled yet. Not worth editing — use the Settings modal instead. |
 
 ## Gmail quotas (not set by this script)
 
@@ -213,6 +214,15 @@ The alias must be configured as a "Send mail as" in Gmail settings (Settings →
 
 **The menu doesn't appear after reload.**
 Wait 10-15 seconds, reload again. Sometimes Apps Script takes a moment to register the `onOpen` trigger on the first load.
+
+**I pasted a new version of `Code.gs`. Does the Web App URL change?**
+No. The URL stays the same across code edits. But edits don't reach the public Web App until you publish a new version: **Deploy → Manage deployments → pencil icon → Version: New version → Deploy**. Recipients keep loading the old code via the same URL otherwise.
+
+**Can I have several campaigns running in parallel?**
+Yes, one per spreadsheet. Each Sheet is its own Apps Script project with its own Settings, scheduled triggers, template pick and tracking Web App.
+
+**How do I add a time-based trigger for checkReplies / checkBounces?**
+Apps Script editor → left sidebar clock icon → Add Trigger → Function: `checkReplies` (or `checkBounces`) → Event source: time-driven → Minute timer → Every 30 minutes.
 
 ## Credits
 
