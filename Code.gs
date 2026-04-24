@@ -46,7 +46,7 @@ const PROP_SCHED_META_PREFIX = "SCHED_META_";       // per-trigger metadata
 const SUPPRESSION_TAB_NAME = "_Suppression";        // auto-generated unsubscribe list
 
 // Column layout. Columns A-L are user lead data (auto-discovered from the row 1
-// headers for placeholder replacement). Columns M-T are auto-written by the script.
+// headers for placeholder replacement). Columns M-U are auto-written by the script.
 const COL = {
   email: 1,            // column A must be email
   sent_at: 13,
@@ -56,7 +56,8 @@ const COL = {
   opened_at: 17,
   clicked_at: 18,
   unsubscribed_at: 19,
-  bounced_at: 20
+  bounced_at: 20,
+  status: 21           // YAMM-style emoji summary of the row
 };
 
 const TRACKING_HEADERS = [
@@ -67,42 +68,40 @@ const TRACKING_HEADERS = [
   { col: 17, name: "opened_at" },
   { col: 18, name: "clicked_at" },
   { col: 19, name: "unsubscribed_at" },
-  { col: 20, name: "bounced_at" }
+  { col: 20, name: "bounced_at" },
+  { col: 21, name: "status" }
 ];
 
 // ---------- Menu ----------
 
 
 function onOpen() {
-  SpreadsheetApp.getUi().createMenu("✉️ Free Mail Merge")
-    .addItem("⚙️  Settings", "openSettings")
-    .addItem("🗂  Pick leads sheet", "chooseSheet")
-    .addItem("🎯 Pick template draft", "chooseTemplate")
-    .addItem("ℹ️  Show current config", "showTemplate")
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu("✉️ Free Mail Merge")
+    .addItem("🚀 Setup", "openSetup")
     .addSeparator()
-    .addItem("🔍 Dry run (preview 3 in logs)", "dryRun")
     .addItem("📨 Send test email", "sendTest")
-    .addSeparator()
-    .addItem("📧 Send batch (skip LK-contacted)", "sendBatchSkipLK")
-    .addItem("📧 Send batch (include LK-contacted)", "sendBatchAll")
-    .addSeparator()
-    .addSubMenu(SpreadsheetApp.getUi().createMenu("⏰ Schedule")
-      .addItem("📅 Schedule one-time batch", "scheduleOneTime")
-      .addItem("🔁 Schedule daily batch", "scheduleDaily")
+    .addItem("📧 Send batch", "sendBatch")
+    .addSubMenu(ui.createMenu("⏰ Schedule")
+      .addItem("📅 One-time batch", "scheduleOneTime")
+      .addItem("🔁 Daily batch", "scheduleDaily")
       .addSeparator()
       .addItem("📋 Refresh schedule tab", "refreshScheduleTab")
-      .addItem("🗑️  Cancel all scheduled jobs", "cancelSchedules"))
+      .addItem("🗑️  Cancel all scheduled", "cancelSchedules"))
     .addSeparator()
-    .addItem("💬 Check replies", "checkReplies")
-    .addItem("📬 Check bounces", "checkBounces")
+    .addItem("📊 Status", "showStatus")
+    .addItem("🔄 Refresh lead statuses", "refreshStatuses")
     .addSeparator()
-    .addSubMenu(SpreadsheetApp.getUi().createMenu("🔗 Tracking")
-      .addItem("🌐 Setup web app (once)", "showWebAppSetup")
-      .addItem("📊 Tracking status", "showTrackingStatus"))
-    .addSeparator()
-    .addItem("↩️  Reset all sends", "resetSent")
-    .addItem("🧹 Reset only errored rows", "resetErrors")
-    .addItem("ℹ️  Campaign status", "showStatus")
+    .addSubMenu(ui.createMenu("🛠️  More")
+      .addItem("⚙️  Settings", "openSettings")
+      .addItem("🗂  Pick leads sheet", "chooseSheet")
+      .addItem("🎯 Pick template draft", "chooseTemplate")
+      .addItem("🌐 Setup tracking web app", "showWebAppSetup")
+      .addSeparator()
+      .addItem("🧹 Reset errored rows", "resetErrors")
+      .addItem("↩️  Reset all sends", "resetSent")
+      .addSeparator()
+      .addItem("🔍 Dry run (preview 3 in logs)", "dryRun"))
     .addToUi();
 }
 
@@ -250,41 +249,6 @@ function saveTemplateDraft(draftId) {
   return true;
 }
 
-function showTemplate() {
-  const lines = [];
-
-  // Settings
-  lines.push("FROM name:   " + _getSetting(PROP_FROM_NAME, FROM_NAME));
-  lines.push("Reply-To:    " + _getSetting(PROP_REPLY_TO, REPLY_TO));
-  lines.push("Test email:  " + _getSetting(PROP_TEST_EMAIL, TEST_EMAIL_DEFAULT));
-  lines.push("");
-
-  // Leads sheet
-  const sheet = _getLeadsSheet();
-  lines.push("Leads sheet: " + (sheet ? sheet.getName() + "  (" + Math.max(0, sheet.getLastRow() - 1) + " rows)" : "NOT PICKED — use '🗂 Pick leads sheet'"));
-
-  // Template draft
-  const id = PropertiesService.getDocumentProperties().getProperty(PROP_DRAFT_ID);
-  if (!id) {
-    lines.push("Template:    NOT PICKED — use '🎯 Pick template draft'");
-  } else {
-    try {
-      const m = GmailApp.getDraft(id).getMessage();
-      lines.push("Template:    " + m.getSubject() + "  (" + m.getAttachments().length + " attachments)");
-    } catch (e) {
-      lines.push("Template:    draft no longer exists, pick another");
-    }
-  }
-  lines.push("");
-
-  // Quota
-  try {
-    lines.push("Remaining Gmail quota today: " + MailApp.getRemainingDailyQuota());
-  } catch (e) { /* ignore */ }
-
-  SpreadsheetApp.getUi().alert("Current config:\n\n" + lines.join("\n"));
-}
-
 function sendTest() {
   const ui = SpreadsheetApp.getUi();
   const defaultTo = _getSetting(PROP_TEST_EMAIL, TEST_EMAIL_DEFAULT);
@@ -337,23 +301,15 @@ function sendTest() {
 // ---------- Entry points ----------
 
 function dryRun() {
-  _run({ dryRun: true, limit: 3, skipLK: true });
+  _run({ dryRun: true, limit: 3 });
 }
 
-function sendBatchSkipLK() {
+function sendBatch() {
   const ui = SpreadsheetApp.getUi();
-  const r = ui.prompt("Send batch", "How many emails? (recommended max 30-40 per run)", ui.ButtonSet.OK_CANCEL);
+  const r = ui.prompt("Send batch", "How many emails? (recommended max 30-40 per run, Apps Script has a 6-min cap)", ui.ButtonSet.OK_CANCEL);
   if (r.getSelectedButton() !== ui.Button.OK) return;
   const limit = parseInt(r.getResponseText(), 10) || BATCH_SIZE_DEFAULT;
-  _run({ dryRun: false, limit, skipLK: true });
-}
-
-function sendBatchAll() {
-  const ui = SpreadsheetApp.getUi();
-  const r = ui.prompt("Send batch (include LK)", "How many emails?", ui.ButtonSet.OK_CANCEL);
-  if (r.getSelectedButton() !== ui.Button.OK) return;
-  const limit = parseInt(r.getResponseText(), 10) || BATCH_SIZE_DEFAULT;
-  _run({ dryRun: false, limit, skipLK: false });
+  _run({ dryRun: false, limit });
 }
 
 // ---------- Core ----------
@@ -404,12 +360,10 @@ function _run(opts) {
     const row = data[i];
     const sheetRow = i + 2;
     const email = String(row[COL.email - 1] || "").trim();
-    const lkContacted = String(row[COL.lk_contacted - 1] || "").trim().toUpperCase();
     const alreadySent = String(row[COL.sent_at - 1] || "").trim();
 
     if (!email || !email.includes("@")) continue;
     if (alreadySent) continue;
-    if (opts.skipLK && lkContacted === "YES") continue;
     if (_isSuppressed(email)) { skipped_suppressed++; continue; }
 
     if (!opts.dryRun && remaining <= QUOTA_SAFETY_MARGIN) {
@@ -449,6 +403,7 @@ function _run(opts) {
         sheet.getRange(sheetRow, COL.error).setValue(String(e).substring(0, 500));
         errors.push(email + ": " + e);
       }
+      _updateStatusIcon(sheet, sheetRow);
       const delay = DELAY_MIN_MS + Math.floor(Math.random() * (DELAY_MAX_MS - DELAY_MIN_MS));
       Utilities.sleep(delay);
     }
@@ -577,36 +532,221 @@ function resetErrors() {
 }
 
 function showStatus() {
+  const ss = SpreadsheetApp.getActive();
   const sheet = _getLeadsSheet();
-  if (!sheet) { SpreadsheetApp.getUi().alert("No leads sheet picked."); return; }
-  const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 15).getValues();
-  let total = 0, sent = 0, err = 0, pending = 0, lkPending = 0, noLKPending = 0;
-  for (const row of data) {
-    const email = row[COL.email - 1];
-    if (!email) continue;
-    total++;
-    const status = String(row[COL.sent_status - 1] || "").trim();
-    const lk = String(row[COL.lk_contacted - 1] || "").trim().toUpperCase();
-    if (status === "sent") sent++;
-    else if (status === "error") err++;
-    else {
-      pending++;
-      if (lk === "YES") lkPending++;
-      else noLKPending++;
+
+  // Config
+  const fromName = _getSetting(PROP_FROM_NAME, FROM_NAME);
+  const replyTo = _getSetting(PROP_REPLY_TO, REPLY_TO);
+  const testEmail = _getSetting(PROP_TEST_EMAIL, TEST_EMAIL_DEFAULT);
+  const injectUnsub = _getSetting(PROP_INJECT_UNSUB, "1") !== "0";
+  const draftId = PropertiesService.getDocumentProperties().getProperty(PROP_DRAFT_ID);
+  let draftSubject = "(none)";
+  if (draftId) {
+    try { draftSubject = GmailApp.getDraft(draftId).getMessage().getSubject(); } catch (e) { draftSubject = "(draft no longer exists)"; }
+  }
+  const sheetName = sheet ? sheet.getName() : "(not picked)";
+  const webAppUrl = _getWebAppUrl();
+  let quota = "";
+  try { quota = String(MailApp.getRemainingDailyQuota()); } catch (e) { quota = "(n/a)"; }
+
+  // Campaign aggregates
+  let total = 0, sent = 0, err = 0, pending = 0;
+  let opened = 0, clicked = 0, replied = 0, unsub = 0, bounced = 0;
+  if (sheet) {
+    const lastRow = sheet.getLastRow();
+    if (lastRow >= 2) {
+      const data = sheet.getRange(2, 1, lastRow - 1, COL.bounced_at).getValues();
+      for (const row of data) {
+        if (!row[COL.email - 1]) continue;
+        total++;
+        const st = String(row[COL.sent_status - 1] || "").trim();
+        if (st === "sent") sent++;
+        else if (st === "error") err++;
+        else pending++;
+        if (row[COL.opened_at - 1]) opened++;
+        if (row[COL.clicked_at - 1]) clicked++;
+        if (row[COL.replied_at - 1]) replied++;
+        if (row[COL.unsubscribed_at - 1]) unsub++;
+        if (row[COL.bounced_at - 1]) bounced++;
+      }
     }
   }
-  let quotaLine = "";
-  try { quotaLine = "\n\nGmail quota remaining today: " + MailApp.getRemainingDailyQuota(); } catch (e) { /* ignore */ }
+  const pct = (n) => (sent ? Math.round(100 * n / sent) + "%" : "-");
 
+  const suppressTab = ss.getSheetByName(SUPPRESSION_TAB_NAME);
+  const supCount = suppressTab ? Math.max(0, suppressTab.getLastRow() - 1) : 0;
+
+  const scheduleTab = ss.getSheetByName(SCHEDULE_TAB_NAME);
+  const scheduledCount = ScriptApp.getProjectTriggers().filter(function(t){
+    return t.getHandlerFunction() === SCHEDULED_HANDLER || t.getHandlerFunction() === SCHEDULED_DAILY_HANDLER;
+  }).length;
+
+  const esc = (s) => String(s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  const row = (label, value) => '<tr><td style="color:#888;padding:2px 12px 2px 0;white-space:nowrap;">' + label + '</td><td style="padding:2px 0;">' + esc(value) + '</td></tr>';
+
+  const html = HtmlService.createHtmlOutput(
+    '<div style="font-family:-apple-system,Helvetica,Arial,sans-serif;padding:20px;color:#222;">' +
+
+    '<h3 style="margin:0 0 4px 0;">📊 Status</h3>' +
+    '<p style="color:#888;margin:0 0 20px 0;font-size:12px;">All the state of this campaign in one place.</p>' +
+
+    '<h4 style="margin:0 0 6px 0;font-size:13px;color:#555;">Configuration</h4>' +
+    '<table style="font-size:13px;margin-bottom:20px;">' +
+      row("From name",  fromName) +
+      row("Reply-To",   replyTo) +
+      row("Test email", testEmail) +
+      row("Unsub footer", injectUnsub ? "injected (Unsubscribe here)" : "disabled") +
+      row("Leads tab",  sheetName) +
+      row("Template",   draftSubject) +
+    '</table>' +
+
+    '<h4 style="margin:0 0 6px 0;font-size:13px;color:#555;">Campaign</h4>' +
+    '<table style="font-size:13px;margin-bottom:20px;">' +
+      row("Total leads", total) +
+      row("✉️  Sent",    sent) +
+      row("❌ Errors",   err) +
+      row("⏳ Pending",  pending) +
+      row("👁  Opened",  opened + "  (" + pct(opened) + " of sent)") +
+      row("🔗 Clicked",  clicked + "  (" + pct(clicked) + " of sent)") +
+      row("💬 Replied",  replied + "  (" + pct(replied) + " of sent)") +
+      row("🚫 Unsub",    unsub) +
+      row("📬 Bounced",  bounced) +
+    '</table>' +
+
+    '<h4 style="margin:0 0 6px 0;font-size:13px;color:#555;">Tracking & infra</h4>' +
+    '<table style="font-size:13px;margin-bottom:20px;">' +
+      row("Web app", webAppUrl ? "✅ deployed" : "⚠️ not deployed") +
+      (webAppUrl ? row("URL", webAppUrl) : "") +
+      row("Gmail quota today", quota) +
+      row("Suppression list", supCount + " address" + (supCount === 1 ? "" : "es")) +
+      row("Scheduled jobs", scheduledCount + (scheduleTab ? "  (see '" + SCHEDULE_TAB_NAME + "' tab)" : "")) +
+    '</table>' +
+
+    '<div style="text-align:right;">' +
+      '<button onclick="google.script.host.close()" style="padding:8px 16px;background:#DA291C;color:white;border:none;border-radius:4px;cursor:pointer;font-weight:600;">Close</button>' +
+    '</div>' +
+    '</div>'
+  ).setWidth(560).setHeight(620);
+  SpreadsheetApp.getUi().showModalDialog(html, "Status");
+}
+
+// ---------- Status icon column (YAMM-style per-lead visual) ----------
+
+function _updateStatusIcon(sheet, sheetRow) {
+  if (!sheet || !sheetRow) return;
+  try {
+    const cells = sheet.getRange(sheetRow, COL.sent_at, 1, COL.status - COL.sent_at + 1).getValues()[0];
+    // indexes within `cells` (0-based): sent_at, sent_status, error, replied_at, opened_at, clicked_at, unsubscribed_at, bounced_at, status
+    const iconFor = {
+      0: { val: cells[0], emoji: "✉️" },  // sent_at → sent
+      3: { val: cells[3], emoji: "💬" },  // replied_at
+      4: { val: cells[4], emoji: "👁" },  // opened_at
+      5: { val: cells[5], emoji: "🔗" },  // clicked_at
+      6: { val: cells[6], emoji: "🚫" },  // unsubscribed_at
+      7: { val: cells[7], emoji: "📬" },  // bounced_at
+    };
+    const icons = [];
+    if (String(cells[1] || "") === "error") icons.push("❌");
+    else if (cells[0]) icons.push("✉️");
+    if (cells[4]) icons.push("👁");
+    if (cells[5]) icons.push("🔗");
+    if (cells[3]) icons.push("💬");
+    if (cells[6]) icons.push("🚫");
+    if (cells[7]) icons.push("📬");
+    sheet.getRange(sheetRow, COL.status).setValue(icons.join(" "));
+  } catch (e) { Logger.log("_updateStatusIcon: " + e); }
+}
+
+function refreshAllStatusIcons(sheet) {
+  sheet = sheet || _getLeadsSheet();
+  if (!sheet) return 0;
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 0;
+  _ensureTrackingHeaders(sheet);
+  const width = COL.status - COL.sent_at + 1;
+  const data = sheet.getRange(2, COL.sent_at, lastRow - 1, width).getValues();
+  const out = data.map(function(cells) {
+    const icons = [];
+    if (String(cells[1] || "") === "error") icons.push("❌");
+    else if (cells[0]) icons.push("✉️");
+    if (cells[4]) icons.push("👁");
+    if (cells[5]) icons.push("🔗");
+    if (cells[3]) icons.push("💬");
+    if (cells[6]) icons.push("🚫");
+    if (cells[7]) icons.push("📬");
+    return [icons.join(" ")];
+  });
+  sheet.getRange(2, COL.status, out.length, 1).setValues(out);
+  return out.length;
+}
+
+function refreshStatuses() {
+  // One-shot refresh: scans inbox for replies + bounces, then rebuilds the icon column.
+  const sheet = _getLeadsSheet();
+  if (!sheet) { SpreadsheetApp.getUi().alert("No leads sheet picked."); return; }
+  let repliesMarked = 0, bouncesMarked = 0;
+  try { repliesMarked = _scanReplies(sheet); } catch (e) { Logger.log(e); }
+  try { bouncesMarked = _scanBounces(sheet); } catch (e) { Logger.log(e); }
+  const iconsRefreshed = refreshAllStatusIcons(sheet);
   SpreadsheetApp.getUi().alert(
-    "Total leads: " + total + "\n" +
-    "  Sent: " + sent + "\n" +
-    "  Errors: " + err + "\n" +
-    "  Pending: " + pending + "\n" +
-    "    No LK: " + noLKPending + "\n" +
-    "    LK: " + lkPending +
-    quotaLine
+    "Lead statuses refreshed.\n\n" +
+    "💬 New replies detected: " + repliesMarked + "\n" +
+    "📬 New bounces detected: " + bouncesMarked + "\n" +
+    "🔄 Rows with icons: " + iconsRefreshed
   );
+}
+
+// ---------- Setup checklist ----------
+
+function openSetup() {
+  const props = PropertiesService.getDocumentProperties();
+  const hasSettings = !!(props.getProperty(PROP_FROM_NAME) && props.getProperty(PROP_REPLY_TO));
+  const hasSheet = !!_getLeadsSheet();
+  const hasTemplate = !!props.getProperty(PROP_DRAFT_ID);
+  const hasWebApp = !!_getWebAppUrl();
+
+  const check = (ok) => ok ? '<span style="color:#10B981;">✓</span>' : '<span style="color:#aaa;">○</span>';
+  const btn = (label, fn, primary) => '<button onclick="run(\'' + fn + '\')" style="padding:6px 12px;font-size:13px;background:' + (primary ? "#DA291C" : "#f5f5f5") + ';color:' + (primary ? "white" : "#222") + ';border:1px solid ' + (primary ? "#DA291C" : "#ccc") + ';border-radius:4px;cursor:pointer;">' + label + '</button>';
+  const row = (ok, title, desc, fn) => '<tr>' +
+    '<td style="padding:10px 10px 10px 0;vertical-align:top;font-size:18px;">' + check(ok) + '</td>' +
+    '<td style="padding:10px 0;vertical-align:top;">' +
+      '<div style="font-weight:600;font-size:14px;">' + title + '</div>' +
+      '<div style="color:#666;font-size:12px;margin-top:2px;">' + desc + '</div>' +
+    '</td>' +
+    '<td style="padding:10px 0 10px 12px;vertical-align:top;text-align:right;">' + btn(ok ? "Edit" : "Setup", fn, !ok) + '</td>' +
+  '</tr>';
+
+  const html = HtmlService.createHtmlOutput(
+    '<div style="font-family:-apple-system,Helvetica,Arial,sans-serif;padding:20px;color:#222;">' +
+    '<h2 style="margin:0 0 4px 0;">🚀 Setup</h2>' +
+    '<p style="color:#666;margin:0 0 16px 0;font-size:13px;">Complete the four steps below. Order matters only between sheet and template. Come back anytime to edit.</p>' +
+    '<table style="width:100%;border-collapse:collapse;">' +
+      row(hasSettings, "Settings",        "From name, reply-to alias, default test email.", "openSettings") +
+      row(hasSheet,    "Leads sheet",     "Which tab holds your leads.",                    "chooseSheet") +
+      row(hasTemplate, "Template draft",  "Which Gmail draft to use as template.",          "chooseTemplate") +
+      row(hasWebApp,   "Tracking web app","Optional. Enables opens, clicks, unsubscribe.",   "showWebAppSetup") +
+    '</table>' +
+    '<div style="text-align:right;margin-top:20px;">' +
+      '<button onclick="google.script.host.close()" style="padding:8px 16px;background:#222;color:white;border:none;border-radius:4px;cursor:pointer;">Done</button>' +
+    '</div>' +
+    '<script>' +
+    'function run(fn){ google.script.run.withSuccessHandler(function(){}).dispatch(fn); google.script.host.close(); }' +
+    '</script>' +
+    '</div>'
+  ).setWidth(560).setHeight(420);
+  SpreadsheetApp.getUi().showModalDialog(html, "Setup");
+}
+
+// Dispatcher used by the Setup modal so a single onclick can call any setup action.
+function dispatch(fn) {
+  switch (fn) {
+    case "openSettings":    openSettings();    break;
+    case "chooseSheet":     chooseSheet();     break;
+    case "chooseTemplate":  chooseTemplate();  break;
+    case "showWebAppSetup": showWebAppSetup(); break;
+  }
+  return true;
 }
 
 // ---------- Scheduling ----------
@@ -637,7 +777,6 @@ function scheduleOneTime() {
     type: "one-time",
     nextFire: date.toISOString(),
     limit,
-    skipLK: true,
     createdAt: new Date().toISOString(),
   });
   refreshScheduleTab();
@@ -674,7 +813,6 @@ function scheduleDaily() {
     hour,
     nextFire: _nextDailyFire(hour).toISOString(),
     limit,
-    skipLK: true,
     createdAt: new Date().toISOString(),
   });
   refreshScheduleTab();
@@ -701,7 +839,7 @@ function cancelSchedules() {
 // Trigger handlers — run unattended, no UI.
 function _scheduledSend(e) {
   const limit = parseInt(PropertiesService.getDocumentProperties().getProperty(PROP_SCHEDULE_LIMIT), 10) || BATCH_SIZE_DEFAULT;
-  _run({ dryRun: false, limit, skipLK: true, silent: true });
+  _run({ dryRun: false, limit, silent: true });
   // One-time trigger: remove itself + its metadata.
   const triggers = ScriptApp.getProjectTriggers();
   for (const t of triggers) {
@@ -715,7 +853,7 @@ function _scheduledSend(e) {
 
 function _scheduledDailySend(e) {
   const limit = parseInt(PropertiesService.getDocumentProperties().getProperty(PROP_SCHEDULE_DAILY_LIMIT), 10) || BATCH_SIZE_DEFAULT;
-  _run({ dryRun: false, limit, skipLK: true, silent: true });
+  _run({ dryRun: false, limit, silent: true });
   // Advance nextFire in metadata to tomorrow for the daily trigger.
   const triggers = ScriptApp.getProjectTriggers();
   for (const t of triggers) {
@@ -775,7 +913,7 @@ function refreshScheduleTab() {
   tab.getRange(1, 1, 1, 1).setValues(title).setFontWeight("bold").setFontSize(14);
   tab.getRange(2, 1, 1, 1).setValues([["Auto-generated. Do not edit — changes will be overwritten."]]).setFontStyle("italic").setFontColor("#888");
 
-  const headers = [["Type", "Next fire", "Batch size", "Skip LK", "Handler", "Trigger ID", "Created"]];
+  const headers = [["Type", "Next fire", "Batch size", "Handler", "Trigger ID", "Created"]];
   tab.getRange(4, 1, 1, headers[0].length).setValues(headers).setFontWeight("bold").setBackground("#f0f0f0");
 
   const triggers = ScriptApp.getProjectTriggers().filter(function(t) {
@@ -803,7 +941,6 @@ function refreshScheduleTab() {
         isDaily ? "🔁 Daily" : "📅 One-time",
         nextFire,
         limit,
-        meta.skipLK === false ? "NO" : "YES",
         t.getHandlerFunction(),
         t.getUniqueId(),
         createdAt,
@@ -812,7 +949,7 @@ function refreshScheduleTab() {
     tab.getRange(5, 1, rows.length, rows[0].length).setValues(rows);
   }
 
-  tab.autoResizeColumns(1, 7);
+  tab.autoResizeColumns(1, 6);
 
   // Best-effort protection: warning-only so the user can unprotect if they want.
   try {
@@ -914,6 +1051,7 @@ function _trackEvent(recipient, colIndex, value) {
         const s = String(cur);
         if (s.indexOf(value) === -1) sheet.getRange(sheetRow, colIndex).setValue(s + "\n" + ts + "  |  " + value);
       }
+      _updateStatusIcon(sheet, sheetRow);
       return;
     }
   }
@@ -1004,15 +1142,11 @@ function _isSuppressed(email) {
 
 // ---------- Bounces ----------
 
-function checkBounces() {
-  const sheet = _getLeadsSheet();
-  if (!sheet) { SpreadsheetApp.getUi().alert("No leads sheet picked."); return; }
+function _scanBounces(sheet) {
   _ensureTrackingHeaders(sheet);
-
   const lastRow = sheet.getLastRow();
-  if (lastRow < 2) { SpreadsheetApp.getUi().alert("No leads."); return; }
+  if (lastRow < 2) return 0;
 
-  // Build lookup of leads (lowercased)
   const all = sheet.getRange(2, 1, lastRow - 1, COL.bounced_at).getValues();
   const emailToRow = {};
   for (let i = 0; i < all.length; i++) {
@@ -1023,7 +1157,6 @@ function checkBounces() {
 
   const threads = GmailApp.search("from:(mailer-daemon OR postmaster) in:inbox newer_than:30d");
   let marked = 0;
-
   for (const t of threads) {
     for (const m of t.getMessages()) {
       const body = (m.getPlainBody() || "");
@@ -1035,6 +1168,7 @@ function checkBounces() {
           const ts = Utilities.formatDate(m.getDate(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm");
           sheet.getRange(row, COL.bounced_at).setValue(ts);
           _addToSuppression(key, "bounce");
+          _updateStatusIcon(sheet, row);
           delete emailToRow[key];
           marked++;
           break;
@@ -1042,6 +1176,13 @@ function checkBounces() {
       }
     }
   }
+  return marked;
+}
+
+function checkBounces() {
+  const sheet = _getLeadsSheet();
+  if (!sheet) { SpreadsheetApp.getUi().alert("No leads sheet picked."); return; }
+  const marked = _scanBounces(sheet);
   SpreadsheetApp.getUi().alert("Bounces detected: " + marked + "\n" +
     (marked ? "Marked in 'bounced_at' column and added to suppression list." : "Inbox scanned, no unseen bounces match your leads."));
 }
@@ -1075,78 +1216,48 @@ function showWebAppSetup() {
   SpreadsheetApp.getUi().showModalDialog(html, "Setup tracking");
 }
 
-function showTrackingStatus() {
-  const url = _getWebAppUrl();
-  const lines = [];
-  if (url) {
-    lines.push("✅ Web app deployed");
-    lines.push("URL: " + url);
-    lines.push("");
-    lines.push("Active tracking:");
-    lines.push("  • Opens   → column " + COL.opened_at + " (opened_at)");
-    lines.push("  • Clicks  → column " + COL.clicked_at + " (clicked_at)");
-    lines.push("  • Unsub   → column " + COL.unsubscribed_at + " (unsubscribed_at) + _Suppression tab");
-    lines.push("  • Bounces → column " + COL.bounced_at + " (bounced_at) — run 'Check bounces' manually");
-  } else {
-    lines.push("⚠️  Web app NOT deployed.");
-    lines.push("");
-    lines.push("Tracking is disabled. Emails will be sent without pixel / link wrapping / unsubscribe link.");
-    lines.push("");
-    lines.push("To enable: menu → 🔗 Tracking → 🌐 Setup web app (once).");
-  }
-
-  const supTab = SpreadsheetApp.getActive().getSheetByName(SUPPRESSION_TAB_NAME);
-  lines.push("");
-  lines.push("Suppression list: " + (supTab ? Math.max(0, supTab.getLastRow() - 1) + " addresses" : "0 addresses (tab not yet created)"));
-
-  SpreadsheetApp.getUi().alert("Tracking status\n\n" + lines.join("\n"));
-}
-
 // ---------- Reply tracking ----------
 
-function checkReplies() {
-  const sheet = _getLeadsSheet();
-  if (!sheet) { SpreadsheetApp.getUi().alert("No leads sheet picked."); return; }
-
-  // Make sure the replied_at header exists in column 16
-  const header = sheet.getRange(1, COL.replied_at).getValue();
-  if (!header) sheet.getRange(1, COL.replied_at).setValue("replied_at");
-
+function _scanReplies(sheet) {
+  _ensureTrackingHeaders(sheet);
   const lastRow = sheet.getLastRow();
-  if (lastRow < 2) { SpreadsheetApp.getUi().alert("No leads."); return; }
+  if (lastRow < 2) return 0;
 
-  const data = sheet.getRange(2, 1, lastRow - 1, 16).getValues();
+  const data = sheet.getRange(2, 1, lastRow - 1, COL.replied_at).getValues();
   const emailToRow = {};
   for (let i = 0; i < data.length; i++) {
     const email = String(data[i][COL.email - 1] || "").trim().toLowerCase();
     const sentAt = data[i][COL.sent_at - 1];
     const alreadyReplied = data[i][COL.replied_at - 1];
     if (!email || !sentAt || alreadyReplied) continue;
-    emailToRow[email] = i + 2; // sheet row
+    emailToRow[email] = i + 2;
   }
-  const pending = Object.keys(emailToRow);
-  if (!pending.length) { SpreadsheetApp.getUi().alert("Nothing to check (no sent rows without a reply)."); return; }
+  if (!Object.keys(emailToRow).length) return 0;
 
-  // Pull recent inbox threads. Limit to last 14 days.
-  const query = "in:inbox newer_than:14d";
-  const threads = GmailApp.search(query, 0, 200);
+  const threads = GmailApp.search("in:inbox newer_than:14d", 0, 200);
   let marked = 0;
-
   for (const t of threads) {
     const msgs = t.getMessages();
     for (const m of msgs) {
       const from = (m.getFrom() || "").toLowerCase();
-      // Extract email inside "Name <email@x>" or bare "email@x"
       const match = from.match(/<([^>]+)>/);
       const addr = (match ? match[1] : from).trim();
       if (!addr || !emailToRow[addr]) continue;
       const row = emailToRow[addr];
       const ts = Utilities.formatDate(m.getDate(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm");
       sheet.getRange(row, COL.replied_at).setValue(ts);
+      _updateStatusIcon(sheet, row);
       delete emailToRow[addr];
       marked++;
       break;
     }
   }
+  return marked;
+}
+
+function checkReplies() {
+  const sheet = _getLeadsSheet();
+  if (!sheet) { SpreadsheetApp.getUi().alert("No leads sheet picked."); return; }
+  const marked = _scanReplies(sheet);
   SpreadsheetApp.getUi().alert("Replies detected: " + marked + "\nRows updated in column " + COL.replied_at + " (replied_at).");
 }

@@ -49,11 +49,11 @@ YAMM charges €60/year for anything beyond 20 emails/day. I needed to send 450 
 3. Select all the default code (Cmd+A / Ctrl+A) and paste the contents of [`Code.gs`](./Code.gs).
 4. Save (Cmd+S). Give the project any name (we use "Free Mail Merge").
 5. Reload the Sheet (Cmd+R). A new menu **"✉️ Free Mail Merge"** appears.
-6. First run — do this once, from the menu:
-   - **⚙️ Settings** → enter your From name, alias, and default test email.
-   - **🗂 Pick leads sheet** → select the tab with your leads.
-   - **🎯 Pick template draft** → select your Gmail draft.
-7. _Optional but recommended:_ **🔗 Tracking → 🌐 Setup web app (once)** to enable opens/clicks/unsubscribe tracking. See [section 8](#8-track-opens-clicks-and-unsubscribes) below.
+6. Open the menu → **🚀 Setup**. A checklist modal walks you through the four things you need:
+   - **Settings**: From name, Reply-To alias, default test email, unsubscribe-footer toggle.
+   - **Leads sheet**: which tab holds your leads.
+   - **Template draft**: which Gmail draft to use.
+   - **Tracking web app** _(optional)_: enables opens, clicks, and an auto-injected unsubscribe link. One 30-second deploy, see [section 8](#8-track-opens-clicks-and-unsubscribes) below.
 
 No code editing needed. Everything is configured from the menu and stored in the spreadsheet.
 
@@ -61,13 +61,13 @@ No code editing needed. Everything is configured from the menu and stored in the
 
 Your leads tab:
 
-| A | B…K | L | M | N | O | P | Q | R | S | T |
+| A | B…L | M | N | O | P | Q | R | S | T | U |
 |---|---|---|---|---|---|---|---|---|---|---|
-| **email** | _your lead data_ | lk_contacted | sent_at | sent_status | error | replied_at | opened_at | clicked_at | unsubscribed_at | bounced_at |
+| **email** | _your lead data_ | sent_at | sent_status | error | replied_at | opened_at | clicked_at | unsubscribed_at | bounced_at | **status** |
 
-- **Column A** must be `email`. The rest of your lead columns (B through K) can be whatever you want — each header becomes an auto-detected merge variable. Reference them as `{{column_name}}` in the draft.
-- **Columns M → T** are written by the script. Leave them blank. All eight header names (`sent_at`, `sent_status`, `error`, `replied_at`, `opened_at`, `clicked_at`, `unsubscribed_at`, `bounced_at`) are created automatically the first time the script needs them.
-- **`lk_contacted`** (column L, optional): values `YES`/`NO`. "Send batch (skip LK-contacted)" skips rows marked `YES`. If you don't need this, leave the column blank or repurpose it.
+- **Column A** must be `email`. The rest of your lead columns (B through L) can be whatever you want — each header becomes an auto-detected merge variable. Reference them as `{{column_name}}` in the draft.
+- **Columns M → U** are written by the script. Leave them blank. All nine header names are created automatically the first time the script needs them.
+- **Column U (`status`)** is a YAMM-style emoji summary per row: `✉️` sent · `👁` opened · `🔗` clicked · `💬` replied · `🚫` unsubscribed · `📬` bounced · `❌` error. Great at-a-glance view while a campaign is running.
 - **Auto-generated tabs**: `_Schedule` (read-only, shows scheduled jobs) and `_Suppression` (unsubscribed + bounced addresses).
 
 ## Usage
