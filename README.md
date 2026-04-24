@@ -19,12 +19,15 @@
 A Google Apps Script you paste into your spreadsheet. It turns any Google Sheet into a mail merge tool:
 
 - Pick any Gmail draft as your template (dropdown, like YAMM).
-- Placeholders `{{first_name}}`, `{{company}}`, `{{anything}}` replaced per row.
+- **Dynamic placeholders**: `{{any_column_header}}` is auto-replaced from the matching cell. No code changes needed.
 - HTML signature, PDF attachments, all preserved from your original draft.
+- **Settings UI** (no code editing): From name, alias and default test email are entered from a modal.
 - Send yourself a real test email before firing the batch.
 - Send in batches. Random 5-15 s delay between emails.
+- **Gmail quota awareness**: batches stop automatically before hitting the daily limit.
 - **Schedule batches** to fire at a specific date/time or every day at a fixed hour.
 - **Runs server-side on Google's infra.** Scheduled batches fire with your laptop closed, Chrome killed, you offline. Zero local dependency.
+- **Visible schedule tab** (`_Schedule`, read-only): see what's queued, when it fires next, batch size. Auto-refreshed.
 - **Track replies** automatically: one click scans your inbox and fills a `replied_at` column.
 - Status tracked in the sheet itself: `sent_at`, `sent_status`, `error`, `replied_at`.
 - Resume where it left off if execution is interrupted.
@@ -43,19 +46,14 @@ YAMM charges €60/year for anything beyond 20 emails/day. I needed to send 450 
 1. Open your Google Sheet.
 2. **Extensions → Apps Script**.
 3. Select all the default code (Cmd+A / Ctrl+A) and paste the contents of [`Code.gs`](./Code.gs).
-4. Edit these four constants at the top to match your setup:
+4. Save (Cmd+S). Give the project any name (we use "Free Mail Merge").
+5. Reload the Sheet (Cmd+R). A new menu **"✉️ Free Mail Merge"** appears.
+6. First run — do this once, from the menu:
+   - **⚙️ Settings** → enter your From name, alias, and default test email.
+   - **🗂 Pick leads sheet** → select the tab with your leads.
+   - **🎯 Pick template draft** → select your Gmail draft.
 
-```javascript
-const FROM_NAME = "Your Name · Your Company";                // display name
-const REPLY_TO = "you@yourdomain.com";                       // reply-to + from alias
-const TEST_EMAIL_DEFAULT = "you@yourdomain.com";             // where test mails go
-```
-
-(The leads tab itself is picked from the menu, not hardcoded, so you can rename the tab anytime.)
-
-5. Save (Cmd+S). Give the project any name (we use "Free Mail Merge").
-6. Reload the Sheet (Cmd+R). A new menu **"Free Mail Merge"** appears.
-7. First run: menu **Free Mail Merge → 🗂 Pick leads sheet** and select the tab with your leads.
+No code editing needed. Everything is configured from the menu and stored in the spreadsheet.
 
 ## Sheet layout
 
@@ -185,7 +183,7 @@ Yes, but the daily quota is 100 recipients/day.
 Edit `DELAY_MIN_MS` and `DELAY_MAX_MS` at the top of the script.
 
 **How do I add more merge variables?**
-Any column header in your sheet becomes a merge variable if you reference it as `{{column_name}}` in the draft. Note: the current code hard-codes `first_name`, `company`, `sector_huma`. Generalise by replacing the `_mergeTemplate` function with a loop over column headers.
+Any column header in your sheet becomes a merge variable automatically. Just reference it as `{{column_name}}` in the draft. No code changes needed.
 
 **Why does the "From" show my login address instead of the alias?**
 The alias must be configured as a "Send mail as" in Gmail settings (Settings → Accounts → Send mail as). Once added, Apps Script can override `from:` with it.

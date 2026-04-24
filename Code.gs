@@ -5,41 +5,51 @@
  * Drop-in replacement for YAMM. Paste this file in Extensions → Apps Script.
  *
  * Setup:
- *   1. Edit the 3 constants below (FROM_NAME, REPLY_TO, TEST_EMAIL_DEFAULT).
- *   2. Save (Cmd+S). Reload the Sheet.
- *   3. Menu "Free Mail Merge" appears.
+ *   1. Paste this file in Extensions → Apps Script → save (Cmd+S) → reload Sheet.
+ *   2. Menu "✉️ Free Mail Merge" appears.
+ *   3. Click "⚙️ Settings" once to enter your From name, alias and test email.
  *
  * Usage:
- *   - Create a draft in Gmail with placeholders {{first_name}}, {{company}}, etc.
- *   - Menu → Pick template draft → select your draft.
- *   - Menu → Send test → receive a real email to yourself.
- *   - Menu → Send batch → fire the campaign.
+ *   - Create a draft in Gmail using placeholders like {{first_name}}, {{company}} (any column header).
+ *   - Menu → 🗂 Pick leads sheet.
+ *   - Menu → 🎯 Pick template draft.
+ *   - Menu → 📨 Send test email.
+ *   - Menu → 📧 Send batch (or ⏰ Schedule).
  *
  * Repo: https://github.com/diegotorreslopez81/free-mail-merge
  */
 
-// ----- EDIT THESE 3 CONSTANTS BEFORE USING -----
+// ----- Fallback defaults. Real values are configured from the menu (⚙️ Settings). -----
 const FROM_NAME = "Your Name · Your Company";       // display name in recipient's inbox
 const REPLY_TO = "you@yourdomain.com";              // Reply-To + From alias (must be a Send-As alias if different from login)
 const TEST_EMAIL_DEFAULT = "you@yourdomain.com";    // default destination for "Send test"
-// -----------------------------------------------
-// NOTE: the leads tab is chosen from the menu ("🗂  Pick leads sheet"), not hardcoded.
-//       If nothing is picked, the script falls back to SHEET_NAME_FALLBACK below.
-const SHEET_NAME_FALLBACK = "Leads";
+const SHEET_NAME_FALLBACK = "Leads";                // fallback tab name if none is picked
+// ---------------------------------------------------------------------------------------
 
-const BATCH_SIZE_DEFAULT = 30;          // default batch size (Apps Script has a 6-min timeout)
-const DELAY_MIN_MS = 5000;              // 5 s
-const DELAY_MAX_MS = 15000;             // 15 s (keep short to stay under the script limit)
+const SCHEDULE_TAB_NAME = "_Schedule";              // auto-generated, read-only tab
+const BATCH_SIZE_DEFAULT = 30;                      // Apps Script has a 6-min timeout
+const DELAY_MIN_MS = 5000;                          // 5 s random delay floor
+const DELAY_MAX_MS = 15000;                         // 15 s random delay ceiling
+const QUOTA_SAFETY_MARGIN = 3;                      // stop a batch when this many quota slots remain
+
+// DocumentProperties keys (never rename — would drop user settings on update)
 const PROP_DRAFT_ID = "TEMPLATE_DRAFT_ID";
 const PROP_SHEET_ID = "LEADS_SHEET_ID";
+const PROP_FROM_NAME = "SETTING_FROM_NAME";
+const PROP_REPLY_TO = "SETTING_REPLY_TO";
+const PROP_TEST_EMAIL = "SETTING_TEST_EMAIL";
 const PROP_SCHEDULE_LIMIT = "SCHEDULE_LIMIT";
 const PROP_SCHEDULE_DAILY_LIMIT = "SCHEDULE_DAILY_LIMIT";
+const PROP_SCHED_META_PREFIX = "SCHED_META_";       // per-trigger metadata
 
-// Column indexes (1-based). Adjust to match your sheet layout.
+// Status-column indexes (1-based). The rest of the columns are whatever the user has
+// in their leads tab and are auto-discovered from row 1 for placeholder replacement.
 const COL = {
-  email: 1, first_name: 2, last_name: 3, company: 4, sector_huma: 5,
-  title: 6, segment: 7, city: 8, num_employees: 9, linkedin_url: 10,
-  website: 11, lk_contacted: 12, sent_at: 13, sent_status: 14, error: 15,
+  email: 1,           // column A must be email
+  lk_contacted: 12,   // optional column L (YES/NO) used by "skip LK-contacted"
+  sent_at: 13,
+  sent_status: 14,
+  error: 15,
   replied_at: 16
 };
 
@@ -48,6 +58,7 @@ const COL = {
 
 function onOpen() {
   SpreadsheetApp.getUi().createMenu("✉️ Free Mail Merge")
+    .addItem("⚙️  Settings", "openSettings")
     .addItem("🗂  Pick leads sheet", "chooseSheet")
     .addItem("🎯 Pick template draft", "chooseTemplate")
     .addItem("ℹ️  Show current config", "showTemplate")
@@ -62,14 +73,72 @@ function onOpen() {
       .addItem("📅 Schedule one-time batch", "scheduleOneTime")
       .addItem("🔁 Schedule daily batch", "scheduleDaily")
       .addSeparator()
-      .addItem("📋 List scheduled jobs", "listSchedules")
+      .addItem("📋 Refresh schedule tab", "refreshScheduleTab")
       .addItem("🗑️  Cancel all scheduled jobs", "cancelSchedules"))
     .addSeparator()
     .addItem("💬 Check replies", "checkReplies")
     .addSeparator()
     .addItem("↩️  Reset all sends", "resetSent")
+    .addItem("🧹 Reset only errored rows", "resetErrors")
     .addItem("ℹ️  Campaign status", "showStatus")
     .addToUi();
+}
+
+// ---------- Settings ----------
+
+function _getSetting(propKey, fallback) {
+  const v = PropertiesService.getDocumentProperties().getProperty(propKey);
+  return (v == null || v === "") ? fallback : v;
+}
+
+function openSettings() {
+  const fromName = _getSetting(PROP_FROM_NAME, FROM_NAME);
+  const replyTo = _getSetting(PROP_REPLY_TO, REPLY_TO);
+  const testEmail = _getSetting(PROP_TEST_EMAIL, TEST_EMAIL_DEFAULT);
+
+  const esc = function(s) { return String(s || "").replace(/"/g, "&quot;").replace(/</g, "&lt;"); };
+
+  const html = HtmlService.createHtmlOutput(
+    '<div style="font-family:-apple-system,Helvetica,Arial,sans-serif;padding:20px;color:#111;">' +
+    '<h2 style="margin:0 0 4px 0;">✉️ Settings</h2>' +
+    '<p style="color:#666;margin:0 0 20px 0;font-size:13px;">These replace the defaults defined at the top of Code.gs. Stored in the spreadsheet, not in code, so pasting a new version of the script won\'t overwrite them.</p>' +
+
+    '<label style="display:block;font-size:12px;color:#333;margin-bottom:4px;font-weight:600;">FROM name (display name)</label>' +
+    '<input id="fromName" type="text" value="' + esc(fromName) + '" style="width:100%;padding:8px;font-size:14px;border:1px solid #ccc;border-radius:4px;margin-bottom:16px;box-sizing:border-box;">' +
+
+    '<label style="display:block;font-size:12px;color:#333;margin-bottom:4px;font-weight:600;">Reply-To / From alias</label>' +
+    '<input id="replyTo" type="email" value="' + esc(replyTo) + '" style="width:100%;padding:8px;font-size:14px;border:1px solid #ccc;border-radius:4px;margin-bottom:4px;box-sizing:border-box;">' +
+    '<p style="color:#888;margin:0 0 16px 0;font-size:11px;">Must exist as "Send mail as" in Gmail Settings → Accounts if different from the login address.</p>' +
+
+    '<label style="display:block;font-size:12px;color:#333;margin-bottom:4px;font-weight:600;">Default test email destination</label>' +
+    '<input id="testEmail" type="email" value="' + esc(testEmail) + '" style="width:100%;padding:8px;font-size:14px;border:1px solid #ccc;border-radius:4px;margin-bottom:20px;box-sizing:border-box;">' +
+
+    '<div style="text-align:right;">' +
+      '<button onclick="google.script.host.close()" style="padding:8px 14px;margin-right:8px;background:#f5f5f5;border:1px solid #ccc;border-radius:4px;cursor:pointer;">Cancel</button>' +
+      '<button onclick="save()" style="padding:8px 14px;background:#DA291C;color:white;border:none;border-radius:4px;cursor:pointer;font-weight:600;">Save</button>' +
+    '</div>' +
+
+    '<script>' +
+    'function save() {' +
+    '  const v = {' +
+    '    fromName: document.getElementById("fromName").value,' +
+    '    replyTo: document.getElementById("replyTo").value,' +
+    '    testEmail: document.getElementById("testEmail").value' +
+    '  };' +
+    '  google.script.run.withSuccessHandler(function(){ google.script.host.close(); }).saveSettings(v);' +
+    '}' +
+    '</script>' +
+    '</div>'
+  ).setWidth(520).setHeight(440);
+  SpreadsheetApp.getUi().showModalDialog(html, "Settings");
+}
+
+function saveSettings(v) {
+  const props = PropertiesService.getDocumentProperties();
+  if (v && v.fromName !== undefined) props.setProperty(PROP_FROM_NAME, v.fromName);
+  if (v && v.replyTo !== undefined) props.setProperty(PROP_REPLY_TO, v.replyTo);
+  if (v && v.testEmail !== undefined) props.setProperty(PROP_TEST_EMAIL, v.testEmail);
+  return true;
 }
 
 // ---------- Leads sheet selection ----------
@@ -152,63 +221,79 @@ function saveTemplateDraft(draftId) {
 function showTemplate() {
   const lines = [];
 
+  // Settings
+  lines.push("FROM name:   " + _getSetting(PROP_FROM_NAME, FROM_NAME));
+  lines.push("Reply-To:    " + _getSetting(PROP_REPLY_TO, REPLY_TO));
+  lines.push("Test email:  " + _getSetting(PROP_TEST_EMAIL, TEST_EMAIL_DEFAULT));
+  lines.push("");
+
   // Leads sheet
   const sheet = _getLeadsSheet();
-  lines.push("Leads sheet: " + (sheet ? sheet.getName() + "  (" + (sheet.getLastRow() - 1) + " rows)" : "NOT PICKED — use '🗂 Pick leads sheet'"));
+  lines.push("Leads sheet: " + (sheet ? sheet.getName() + "  (" + Math.max(0, sheet.getLastRow() - 1) + " rows)" : "NOT PICKED — use '🗂 Pick leads sheet'"));
 
   // Template draft
   const id = PropertiesService.getDocumentProperties().getProperty(PROP_DRAFT_ID);
   if (!id) {
-    lines.push("Template: NOT PICKED — use '🎯 Pick template draft'");
+    lines.push("Template:    NOT PICKED — use '🎯 Pick template draft'");
   } else {
     try {
       const m = GmailApp.getDraft(id).getMessage();
-      lines.push("Template: " + m.getSubject() + "  (" + m.getAttachments().length + " attachments)");
+      lines.push("Template:    " + m.getSubject() + "  (" + m.getAttachments().length + " attachments)");
     } catch (e) {
-      lines.push("Template: draft no longer exists, pick another");
+      lines.push("Template:    draft no longer exists, pick another");
     }
   }
+  lines.push("");
+
+  // Quota
+  try {
+    lines.push("Remaining Gmail quota today: " + MailApp.getRemainingDailyQuota());
+  } catch (e) { /* ignore */ }
 
   SpreadsheetApp.getUi().alert("Current config:\n\n" + lines.join("\n"));
 }
 
 function sendTest() {
   const ui = SpreadsheetApp.getUi();
-  const r = ui.prompt("Send test", "To which email? (default " + TEST_EMAIL_DEFAULT + ")", ui.ButtonSet.OK_CANCEL);
+  const defaultTo = _getSetting(PROP_TEST_EMAIL, TEST_EMAIL_DEFAULT);
+  const r = ui.prompt("Send test", "To which email? (default " + defaultTo + ")", ui.ButtonSet.OK_CANCEL);
   if (r.getSelectedButton() !== ui.Button.OK) return;
-  const testEmail = (r.getResponseText() || "").trim() || TEST_EMAIL_DEFAULT;
+  const testEmail = (r.getResponseText() || "").trim() || defaultTo;
 
   const tmpl = _getTemplateDraft();
   if (!tmpl.ok) { ui.alert(tmpl.error); return; }
 
   const sheet = _getLeadsSheet();
   if (!sheet) { ui.alert("No leads sheet picked. Use '🗂 Pick leads sheet' first."); return; }
-  const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 15).getValues();
-  let sample = null;
-  for (const row of data) {
-    if (row[COL.email - 1] && !row[COL.sent_at - 1]) {
-      sample = {
-        first_name: row[COL.first_name - 1] || "Test",
-        company: row[COL.company - 1] || "Empresa Test",
-        sector_huma: row[COL.sector_huma - 1] || "pimes com la teva",
-      };
-      break;
+
+  const headers = _getHeaders(sheet);
+  const lastRow = sheet.getLastRow();
+  let vars = null;
+  if (lastRow >= 2) {
+    const all = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+    for (const row of all) {
+      if (row[COL.email - 1] && !row[COL.sent_at - 1]) {
+        vars = _buildVars(headers, row);
+        break;
+      }
     }
   }
-  if (!sample) sample = { first_name: "Test", company: "Empresa Test", sector_huma: "pimes com la teva" };
+  if (!vars) vars = _sampleVars(headers);
 
-  const merged = _mergeTemplate(tmpl.data, sample);
+  const merged = _mergeTemplate(tmpl.data, vars);
+  const fromName = _getSetting(PROP_FROM_NAME, FROM_NAME);
+  const replyTo = _getSetting(PROP_REPLY_TO, REPLY_TO);
   try {
     GmailApp.sendEmail(testEmail, "[TEST] " + merged.subject, merged.plainBody, {
       htmlBody: merged.htmlBody,
       attachments: tmpl.data.attachments,
-      name: FROM_NAME,
-      from: REPLY_TO,
-      replyTo: REPLY_TO,
+      name: fromName,
+      from: replyTo,
+      replyTo: replyTo,
     });
-    ui.alert("✅ Test sent to " + testEmail + "\n\nUsing lead data: " + sample.first_name + " · " + sample.company + "\n\nVerify:\n- From: " + REPLY_TO + "\n- HTML signature renders\n- Attachment present\n- Placeholders replaced\n- Links work");
+    ui.alert("✅ Test sent to " + testEmail + "\n\nFrom alias: " + replyTo + "\n\nVerify: HTML signature, attachment, placeholders all replaced, links clickable.");
   } catch (e) {
-    ui.alert("❌ Error: " + e);
+    ui.alert("❌ Error: " + e + "\n\nCommon causes: the alias '" + replyTo + "' isn't configured as 'Send mail as' in Gmail Settings → Accounts.");
   }
 }
 
@@ -245,32 +330,50 @@ function _run(opts) {
   }
 
   const tmpl = _getTemplateDraft();
-  if (!tmpl.ok) { SpreadsheetApp.getUi().alert(tmpl.error); return; }
+  if (!tmpl.ok) {
+    if (opts.silent) { Logger.log(tmpl.error); } else { SpreadsheetApp.getUi().alert(tmpl.error); }
+    return;
+  }
 
   const lastRow = sheet.getLastRow();
-  if (lastRow < 2) { SpreadsheetApp.getUi().alert("No leads in the sheet."); return; }
+  if (lastRow < 2) {
+    const msg = "No leads in the sheet.";
+    if (opts.silent) { Logger.log(msg); } else { SpreadsheetApp.getUi().alert(msg); }
+    return;
+  }
 
-  const range = sheet.getRange(2, 1, lastRow - 1, 15);
-  const data = range.getValues();
+  const headers = _getHeaders(sheet);
+  const data = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+
+  const fromName = _getSetting(PROP_FROM_NAME, FROM_NAME);
+  const replyTo = _getSetting(PROP_REPLY_TO, REPLY_TO);
 
   let sent = 0;
+  let skipped_quota = false;
   const errors = [];
+
+  // Quota awareness: stop before we get pushed off the cliff.
+  let remaining = Infinity;
+  try { remaining = MailApp.getRemainingDailyQuota(); } catch (e) { /* ignore */ }
 
   for (let i = 0; i < data.length && sent < opts.limit; i++) {
     const row = data[i];
     const sheetRow = i + 2;
     const email = String(row[COL.email - 1] || "").trim();
-    const firstName = String(row[COL.first_name - 1] || "").trim();
-    const company = String(row[COL.company - 1] || "").trim();
-    const sectorHuma = String(row[COL.sector_huma - 1] || "").trim();
     const lkContacted = String(row[COL.lk_contacted - 1] || "").trim().toUpperCase();
     const alreadySent = String(row[COL.sent_at - 1] || "").trim();
 
     if (!email || !email.includes("@")) continue;
-    if (alreadySent) continue;            // skip already sent
+    if (alreadySent) continue;
     if (opts.skipLK && lkContacted === "YES") continue;
 
-    const merged = _mergeTemplate(tmpl.data, { first_name: firstName, company, sector_huma: sectorHuma });
+    if (!opts.dryRun && remaining <= QUOTA_SAFETY_MARGIN) {
+      skipped_quota = true;
+      break;
+    }
+
+    const vars = _buildVars(headers, row);
+    const merged = _mergeTemplate(tmpl.data, vars);
 
     if (opts.dryRun) {
       Logger.log("=== DRY RUN [" + (sent + 1) + "] ===");
@@ -282,10 +385,11 @@ function _run(opts) {
         GmailApp.sendEmail(email, merged.subject, merged.plainBody, {
           htmlBody: merged.htmlBody,
           attachments: tmpl.data.attachments,
-          name: FROM_NAME,
-          from: REPLY_TO,          // force sender to the Send-as alias
-          replyTo: REPLY_TO,
+          name: fromName,
+          from: replyTo,
+          replyTo: replyTo,
         });
+        remaining = Math.max(0, remaining - 1);
         const ts = new Date().toISOString();
         sheet.getRange(sheetRow, COL.sent_at).setValue(ts);
         sheet.getRange(sheetRow, COL.sent_status).setValue("sent");
@@ -296,21 +400,46 @@ function _run(opts) {
         sheet.getRange(sheetRow, COL.error).setValue(String(e).substring(0, 500));
         errors.push(email + ": " + e);
       }
-      // random delay to be gentle
       const delay = DELAY_MIN_MS + Math.floor(Math.random() * (DELAY_MAX_MS - DELAY_MIN_MS));
       Utilities.sleep(delay);
     }
     sent++;
   }
 
-  const msg = opts.dryRun
-    ? "Dry run OK. " + sent + " emails rendered. Check Executions → Logs."
-    : "Sent: " + sent + (errors.length ? "\nErrors: " + errors.length : "");
-  if (opts.silent) {
-    Logger.log(msg);
+  let msg;
+  if (opts.dryRun) {
+    msg = "Dry run OK. " + sent + " emails rendered. Check Executions → Logs.";
   } else {
-    SpreadsheetApp.getUi().alert(msg);
+    msg = "Sent: " + sent;
+    if (errors.length) msg += "\nErrors: " + errors.length + " (see 'error' column)";
+    if (skipped_quota) msg += "\n\n⚠️ Stopped early: Gmail daily quota reached (" + QUOTA_SAFETY_MARGIN + " slot safety margin). Remaining: " + remaining + ".";
   }
+  if (opts.silent) { Logger.log(msg); } else { SpreadsheetApp.getUi().alert(msg); }
+}
+
+// ---------- Header + vars helpers ----------
+
+function _getHeaders(sheet) {
+  const lastCol = Math.max(1, sheet.getLastColumn());
+  const row = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  return row.map(function(v) { return String(v || "").trim(); });
+}
+
+function _buildVars(headers, row) {
+  const vars = {};
+  for (let i = 0; i < headers.length; i++) {
+    const key = headers[i];
+    if (!key) continue;
+    vars[key] = row[i] == null ? "" : String(row[i]);
+  }
+  return vars;
+}
+
+function _sampleVars(headers) {
+  // Dummy values when no real lead is available (e.g., send test on empty sheet).
+  const vars = {};
+  for (const h of headers) { if (h) vars[h] = "[" + h + "]"; }
+  return vars;
 }
 
 function _getLeadsSheet() {
@@ -345,10 +474,12 @@ function _getTemplateDraft() {
 }
 
 function _mergeTemplate(tmpl, vars) {
-  const subst = (s) => (s || "")
-    .replace(/\{\{first_name\}\}/g, vars.first_name || "")
-    .replace(/\{\{company\}\}/g, vars.company || "")
-    .replace(/\{\{sector_huma\}\}/g, vars.sector_huma || "");
+  // Dynamic: replace {{any_key}} where `any_key` is any column header from the leads sheet.
+  const subst = function(s) {
+    return (s || "").replace(/\{\{\s*([^}\s]+)\s*\}\}/g, function(match, key) {
+      return Object.prototype.hasOwnProperty.call(vars, key) ? vars[key] : match;
+    });
+  };
   return {
     subject: subst(tmpl.subject),
     htmlBody: subst(tmpl.htmlBody),
@@ -371,6 +502,29 @@ function resetSent() {
   ui.alert("Reset done.");
 }
 
+function resetErrors() {
+  const ui = SpreadsheetApp.getUi();
+  const sheet = _getLeadsSheet();
+  if (!sheet) { ui.alert("No leads sheet picked."); return; }
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) { ui.alert("No leads."); return; }
+
+  const range = sheet.getRange(2, COL.sent_at, lastRow - 1, 3);
+  const values = range.getValues();
+  let cleared = 0;
+  for (let i = 0; i < values.length; i++) {
+    if (String(values[i][1] || "").trim() === "error") {
+      values[i] = ["", "", ""];
+      cleared++;
+    }
+  }
+  if (!cleared) { ui.alert("No errored rows found."); return; }
+  const r = ui.alert("Reset errored rows", "Clear sent_at/status/error on " + cleared + " rows that previously errored? Next batch will retry them.", ui.ButtonSet.YES_NO);
+  if (r !== ui.Button.YES) return;
+  range.setValues(values);
+  ui.alert("Cleared " + cleared + " errored rows.");
+}
+
 function showStatus() {
   const sheet = _getLeadsSheet();
   if (!sheet) { SpreadsheetApp.getUi().alert("No leads sheet picked."); return; }
@@ -390,13 +544,17 @@ function showStatus() {
       else noLKPending++;
     }
   }
+  let quotaLine = "";
+  try { quotaLine = "\n\nGmail quota remaining today: " + MailApp.getRemainingDailyQuota(); } catch (e) { /* ignore */ }
+
   SpreadsheetApp.getUi().alert(
     "Total leads: " + total + "\n" +
     "  Sent: " + sent + "\n" +
     "  Errors: " + err + "\n" +
     "  Pending: " + pending + "\n" +
     "    No LK: " + noLKPending + "\n" +
-    "    LK: " + lkPending
+    "    LK: " + lkPending +
+    quotaLine
   );
 }
 
@@ -408,7 +566,7 @@ const SCHEDULED_DAILY_HANDLER = "_scheduledDailySend";
 function scheduleOneTime() {
   const ui = SpreadsheetApp.getUi();
   const r1 = ui.prompt("Schedule one-time batch",
-    "When? Use format YYYY-MM-DD HH:MM (24h, script timezone: " + Session.getScriptTimeZone() + ")\n\nExample: 2026-04-24 09:30",
+    "When? Use format YYYY-MM-DD HH:MM (24h, script timezone: " + Session.getScriptTimeZone() + ")\n\nExample: 2026-04-25 09:30",
     ui.ButtonSet.OK_CANCEL);
   if (r1.getSelectedButton() !== ui.Button.OK) return;
 
@@ -423,8 +581,16 @@ function scheduleOneTime() {
 
   PropertiesService.getDocumentProperties().setProperty(PROP_SCHEDULE_LIMIT, String(limit));
 
-  ScriptApp.newTrigger(SCHEDULED_HANDLER).timeBased().at(date).create();
-  ui.alert("✅ Scheduled " + limit + " emails for " + when + ".\n\nThe script will run unattended at that time. Make sure a template draft is picked.");
+  const trig = ScriptApp.newTrigger(SCHEDULED_HANDLER).timeBased().at(date).create();
+  _saveScheduleMeta(trig.getUniqueId(), {
+    type: "one-time",
+    nextFire: date.toISOString(),
+    limit,
+    skipLK: true,
+    createdAt: new Date().toISOString(),
+  });
+  refreshScheduleTab();
+  ui.alert("✅ Scheduled " + limit + " emails for " + when + ".\n\nSee the '" + SCHEDULE_TAB_NAME + "' tab for the full schedule.");
 }
 
 function scheduleDaily() {
@@ -442,32 +608,26 @@ function scheduleDaily() {
 
   PropertiesService.getDocumentProperties().setProperty(PROP_SCHEDULE_DAILY_LIMIT, String(limit));
 
-  // Wipe any previous daily triggers so we don't duplicate
+  // Wipe any previous daily triggers so we don't duplicate.
   const existing = ScriptApp.getProjectTriggers();
   for (const t of existing) {
-    if (t.getHandlerFunction() === SCHEDULED_DAILY_HANDLER) ScriptApp.deleteTrigger(t);
+    if (t.getHandlerFunction() === SCHEDULED_DAILY_HANDLER) {
+      _deleteScheduleMeta(t.getUniqueId());
+      ScriptApp.deleteTrigger(t);
+    }
   }
 
-  ScriptApp.newTrigger(SCHEDULED_DAILY_HANDLER).timeBased().everyDays(1).atHour(hour).create();
-  ui.alert("✅ Daily batch of " + limit + " emails scheduled at " + hour + ":00.\n\nCancel anytime via 'Cancel all scheduled jobs'.");
-}
-
-function listSchedules() {
-  const triggers = ScriptApp.getProjectTriggers().filter(function(t) {
-    return t.getHandlerFunction() === SCHEDULED_HANDLER || t.getHandlerFunction() === SCHEDULED_DAILY_HANDLER;
+  const trig = ScriptApp.newTrigger(SCHEDULED_DAILY_HANDLER).timeBased().everyDays(1).atHour(hour).create();
+  _saveScheduleMeta(trig.getUniqueId(), {
+    type: "daily",
+    hour,
+    nextFire: _nextDailyFire(hour).toISOString(),
+    limit,
+    skipLK: true,
+    createdAt: new Date().toISOString(),
   });
-  if (!triggers.length) { SpreadsheetApp.getUi().alert("No scheduled jobs."); return; }
-
-  const props = PropertiesService.getDocumentProperties();
-  const oneTimeLimit = props.getProperty(PROP_SCHEDULE_LIMIT) || BATCH_SIZE_DEFAULT;
-  const dailyLimit = props.getProperty(PROP_SCHEDULE_DAILY_LIMIT) || BATCH_SIZE_DEFAULT;
-
-  const lines = triggers.map(function(t) {
-    const fn = t.getHandlerFunction();
-    if (fn === SCHEDULED_DAILY_HANDLER) return "🔁 Daily — " + dailyLimit + " emails/day";
-    return "📅 One-time — " + oneTimeLimit + " emails (trigger id " + t.getUniqueId() + ")";
-  });
-  SpreadsheetApp.getUi().alert("Scheduled jobs:\n\n" + lines.join("\n"));
+  refreshScheduleTab();
+  ui.alert("✅ Daily batch of " + limit + " emails scheduled at " + hour + ":00.\n\nSee the '" + SCHEDULE_TAB_NAME + "' tab for the full schedule.");
 }
 
 function cancelSchedules() {
@@ -478,26 +638,45 @@ function cancelSchedules() {
   const triggers = ScriptApp.getProjectTriggers();
   for (const t of triggers) {
     if (t.getHandlerFunction() === SCHEDULED_HANDLER || t.getHandlerFunction() === SCHEDULED_DAILY_HANDLER) {
-      ScriptApp.deleteTrigger(t); n++;
+      _deleteScheduleMeta(t.getUniqueId());
+      ScriptApp.deleteTrigger(t);
+      n++;
     }
   }
+  refreshScheduleTab();
   ui.alert("Cancelled " + n + " scheduled job(s).");
 }
 
 // Trigger handlers — run unattended, no UI.
-function _scheduledSend() {
+function _scheduledSend(e) {
   const limit = parseInt(PropertiesService.getDocumentProperties().getProperty(PROP_SCHEDULE_LIMIT), 10) || BATCH_SIZE_DEFAULT;
   _run({ dryRun: false, limit, skipLK: true, silent: true });
-  // One-time trigger: remove itself so it doesn't linger.
+  // One-time trigger: remove itself + its metadata.
   const triggers = ScriptApp.getProjectTriggers();
   for (const t of triggers) {
-    if (t.getHandlerFunction() === SCHEDULED_HANDLER) ScriptApp.deleteTrigger(t);
+    if (t.getHandlerFunction() === SCHEDULED_HANDLER) {
+      _deleteScheduleMeta(t.getUniqueId());
+      ScriptApp.deleteTrigger(t);
+    }
   }
+  try { refreshScheduleTab(); } catch (err) { Logger.log(err); }
 }
 
-function _scheduledDailySend() {
+function _scheduledDailySend(e) {
   const limit = parseInt(PropertiesService.getDocumentProperties().getProperty(PROP_SCHEDULE_DAILY_LIMIT), 10) || BATCH_SIZE_DEFAULT;
   _run({ dryRun: false, limit, skipLK: true, silent: true });
+  // Advance nextFire in metadata to tomorrow for the daily trigger.
+  const triggers = ScriptApp.getProjectTriggers();
+  for (const t of triggers) {
+    if (t.getHandlerFunction() === SCHEDULED_DAILY_HANDLER) {
+      const meta = _getScheduleMeta(t.getUniqueId());
+      if (meta && typeof meta.hour === "number") {
+        meta.nextFire = _nextDailyFire(meta.hour).toISOString();
+        _saveScheduleMeta(t.getUniqueId(), meta);
+      }
+    }
+  }
+  try { refreshScheduleTab(); } catch (err) { Logger.log(err); }
 }
 
 function _parseScheduleDate(s) {
@@ -506,6 +685,89 @@ function _parseScheduleDate(s) {
   if (!m) return null;
   const d = new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]), parseInt(m[4]), parseInt(m[5]), 0);
   return isNaN(d.getTime()) ? null : d;
+}
+
+function _nextDailyFire(hour) {
+  const now = new Date();
+  const next = new Date();
+  next.setHours(hour, 0, 0, 0);
+  if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 1);
+  return next;
+}
+
+// Metadata helpers — one entry per trigger, keyed by uniqueId.
+function _saveScheduleMeta(triggerId, meta) {
+  PropertiesService.getDocumentProperties().setProperty(PROP_SCHED_META_PREFIX + triggerId, JSON.stringify(meta));
+}
+function _getScheduleMeta(triggerId) {
+  const raw = PropertiesService.getDocumentProperties().getProperty(PROP_SCHED_META_PREFIX + triggerId);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (e) { return null; }
+}
+function _deleteScheduleMeta(triggerId) {
+  PropertiesService.getDocumentProperties().deleteProperty(PROP_SCHED_META_PREFIX + triggerId);
+}
+
+// ---------- Schedule tab (read-only) ----------
+
+function refreshScheduleTab() {
+  const ss = SpreadsheetApp.getActive();
+  let tab = ss.getSheetByName(SCHEDULE_TAB_NAME);
+  if (!tab) {
+    tab = ss.insertSheet(SCHEDULE_TAB_NAME);
+    tab.setTabColor("#DA291C");
+  }
+
+  tab.clear();
+
+  const title = [["✉️ Free Mail Merge — scheduled jobs"]];
+  tab.getRange(1, 1, 1, 1).setValues(title).setFontWeight("bold").setFontSize(14);
+  tab.getRange(2, 1, 1, 1).setValues([["Auto-generated. Do not edit — changes will be overwritten."]]).setFontStyle("italic").setFontColor("#888");
+
+  const headers = [["Type", "Next fire", "Batch size", "Skip LK", "Handler", "Trigger ID", "Created"]];
+  tab.getRange(4, 1, 1, headers[0].length).setValues(headers).setFontWeight("bold").setBackground("#f0f0f0");
+
+  const triggers = ScriptApp.getProjectTriggers().filter(function(t) {
+    return t.getHandlerFunction() === SCHEDULED_HANDLER || t.getHandlerFunction() === SCHEDULED_DAILY_HANDLER;
+  });
+
+  if (!triggers.length) {
+    tab.getRange(5, 1, 1, 1).setValues([["(no jobs scheduled)"]]).setFontColor("#888");
+  } else {
+    const tz = Session.getScriptTimeZone();
+    const rows = triggers.map(function(t) {
+      const meta = _getScheduleMeta(t.getUniqueId()) || {};
+      const isDaily = t.getHandlerFunction() === SCHEDULED_DAILY_HANDLER;
+      let nextFire = "";
+      if (isDaily && typeof meta.hour === "number") {
+        nextFire = Utilities.formatDate(_nextDailyFire(meta.hour), tz, "yyyy-MM-dd HH:mm") + "  (then daily)";
+      } else if (meta.nextFire) {
+        nextFire = Utilities.formatDate(new Date(meta.nextFire), tz, "yyyy-MM-dd HH:mm");
+      } else {
+        nextFire = "(unknown — created before this version)";
+      }
+      const createdAt = meta.createdAt ? Utilities.formatDate(new Date(meta.createdAt), tz, "yyyy-MM-dd HH:mm") : "";
+      const limit = meta.limit || PropertiesService.getDocumentProperties().getProperty(isDaily ? PROP_SCHEDULE_DAILY_LIMIT : PROP_SCHEDULE_LIMIT) || BATCH_SIZE_DEFAULT;
+      return [
+        isDaily ? "🔁 Daily" : "📅 One-time",
+        nextFire,
+        limit,
+        meta.skipLK === false ? "NO" : "YES",
+        t.getHandlerFunction(),
+        t.getUniqueId(),
+        createdAt,
+      ];
+    });
+    tab.getRange(5, 1, rows.length, rows[0].length).setValues(rows);
+  }
+
+  tab.autoResizeColumns(1, 7);
+
+  // Best-effort protection: warning-only so the user can unprotect if they want.
+  try {
+    const protection = tab.protect().setDescription("Auto-managed by Free Mail Merge");
+    protection.setWarningOnly(true);
+  } catch (e) { /* ignore in contexts where protect isn't allowed */ }
 }
 
 // ---------- Reply tracking ----------
