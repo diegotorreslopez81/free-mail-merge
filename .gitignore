@@ -2,3 +2,10 @@
 *.log
 .vscode/
 .idea/
+
+# clasp — local Apps Script binding, contains your private Script ID
+.clasp.json
+.clasprc.json
+
+# Local-only post-install helpers (e.g. linkedin-post.html)
+linkedin-post.html
