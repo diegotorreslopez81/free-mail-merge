@@ -1,0 +1,4 @@
+# Files to exclude from `clasp push` (only actual Apps Script files should reach the server)
+**/**
+!appsscript.json
+!Code.gs
