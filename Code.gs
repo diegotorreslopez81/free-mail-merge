@@ -43,6 +43,9 @@ const PROP_SCHEDULE_LIMIT = "SCHEDULE_LIMIT";
 const PROP_SCHEDULE_DAILY_LIMIT = "SCHEDULE_DAILY_LIMIT";
 const PROP_SCHED_META_PREFIX = "SCHED_META_";       // per-trigger metadata
 const PROP_VERIFIER_URL = "SETTING_VERIFIER_URL";   // optional SMTP verifier endpoint (smtp_verifier.py --serve)
+const PROP_CRM_BASE_URL = "SETTING_CRM_BASE_URL";   // optional CRM REST API base, e.g. "https://crm.infinitelabs.co/rest"
+const PROP_CRM_API_KEY = "SETTING_CRM_API_KEY";     // CRM bearer token
+const PROP_CRM_CAMPAIGN_ID = "SETTING_CRM_CAMPAIGN_ID";  // optional campaign id to attach touchpoints to
 
 const SUPPRESSION_TAB_NAME = "_Suppression";        // auto-generated unsubscribe list
 
@@ -100,6 +103,7 @@ function onOpen() {
       .addItem("🗂  Pick leads sheet", "chooseSheet")
       .addItem("🎯 Pick template draft", "chooseTemplate")
       .addItem("🌐 Setup tracking web app", "showWebAppSetup")
+      .addItem("🧪 Test CRM connection", "testCrmConnection")
       .addSeparator()
       .addItem("🧹 Reset errored rows", "resetErrors")
       .addItem("↩️  Reset all sends", "resetSent")
@@ -121,6 +125,9 @@ function openSettings() {
   const testEmail = _getSetting(PROP_TEST_EMAIL, TEST_EMAIL_DEFAULT);
   const injectUnsub = _getSetting(PROP_INJECT_UNSUB, "1") !== "0";
   const verifierUrl = _getSetting(PROP_VERIFIER_URL, "");
+  const crmBaseUrl = _getSetting(PROP_CRM_BASE_URL, "");
+  const crmApiKey = _getSetting(PROP_CRM_API_KEY, "");
+  const crmCampaignId = _getSetting(PROP_CRM_CAMPAIGN_ID, "");
 
   const esc = function(s) { return String(s || "").replace(/"/g, "&quot;").replace(/</g, "&lt;"); };
 
@@ -150,6 +157,18 @@ function openSettings() {
     '<input id="verifierUrl" type="url" value="' + esc(verifierUrl) + '" placeholder="https://verifier.example.com" style="width:100%;padding:8px;font-size:14px;border:1px solid #ccc;border-radius:4px;margin-bottom:4px;box-sizing:border-box;">' +
     '<p style="color:#888;margin:0 0 16px 0;font-size:11px;">If you run smtp_verifier.py from this repo as an HTTPS server, paste its base URL. Leave empty to use the free DNS-only check (drops fake domains).</p>' +
 
+    '<div style="border-top:1px solid #eee;margin:8px 0 16px 0;padding-top:12px;"><strong style="font-size:13px;">CRM trace</strong><br><span style="color:#888;font-size:11px;">After each successful send, upserts Company + Person on your CRM and creates an EMAIL_SENT touchpoint. Tested with Twenty CRM (twenty.com).</span></div>' +
+
+    '<label style="display:block;font-size:12px;color:#333;margin-bottom:4px;font-weight:600;">CRM REST API base URL <span style="color:#888;font-weight:400;">(optional)</span></label>' +
+    '<input id="crmBaseUrl" type="url" value="' + esc(crmBaseUrl) + '" placeholder="https://crm.example.com/rest" style="width:100%;padding:8px;font-size:14px;border:1px solid #ccc;border-radius:4px;margin-bottom:12px;box-sizing:border-box;">' +
+
+    '<label style="display:block;font-size:12px;color:#333;margin-bottom:4px;font-weight:600;">CRM API key <span style="color:#888;font-weight:400;">(bearer token)</span></label>' +
+    '<input id="crmApiKey" type="password" value="' + esc(crmApiKey) + '" placeholder="eyJhbGciOiJI…" style="width:100%;padding:8px;font-size:14px;border:1px solid #ccc;border-radius:4px;margin-bottom:12px;box-sizing:border-box;">' +
+
+    '<label style="display:block;font-size:12px;color:#333;margin-bottom:4px;font-weight:600;">CRM campaign ID <span style="color:#888;font-weight:400;">(optional, links touchpoints)</span></label>' +
+    '<input id="crmCampaignId" type="text" value="' + esc(crmCampaignId) + '" placeholder="e75ef6cc-eb7c-4485-…" style="width:100%;padding:8px;font-size:14px;border:1px solid #ccc;border-radius:4px;margin-bottom:4px;box-sizing:border-box;">' +
+    '<p style="color:#888;margin:0 0 16px 0;font-size:11px;">Leave empty if you don\'t use campaigns. After saving, run "🛠️ More → 🧪 Test CRM connection" to verify.</p>' +
+
 
     '<div style="text-align:right;">' +
       '<button onclick="google.script.host.close()" style="padding:8px 14px;margin-right:8px;background:#f5f5f5;border:1px solid #ccc;border-radius:4px;cursor:pointer;">Cancel</button>' +
@@ -163,13 +182,16 @@ function openSettings() {
     '    replyTo: document.getElementById("replyTo").value,' +
     '    testEmail: document.getElementById("testEmail").value,' +
     '    injectUnsub: document.getElementById("injectUnsub").checked ? "1" : "0",' +
-    '    verifierUrl: document.getElementById("verifierUrl").value' +
+    '    verifierUrl: document.getElementById("verifierUrl").value,' +
+    '    crmBaseUrl: document.getElementById("crmBaseUrl").value,' +
+    '    crmApiKey: document.getElementById("crmApiKey").value,' +
+    '    crmCampaignId: document.getElementById("crmCampaignId").value' +
     '  };' +
     '  google.script.run.withSuccessHandler(function(){ google.script.host.close(); }).saveSettings(v);' +
     '}' +
     '</script>' +
     '</div>'
-  ).setWidth(520).setHeight(560);
+  ).setWidth(520).setHeight(820);
   SpreadsheetApp.getUi().showModalDialog(html, "Settings");
 }
 
@@ -180,6 +202,9 @@ function saveSettings(v) {
   if (v && v.testEmail !== undefined) props.setProperty(PROP_TEST_EMAIL, v.testEmail);
   if (v && v.injectUnsub !== undefined) props.setProperty(PROP_INJECT_UNSUB, v.injectUnsub);
   if (v && v.verifierUrl !== undefined) props.setProperty(PROP_VERIFIER_URL, v.verifierUrl);
+  if (v && v.crmBaseUrl !== undefined) props.setProperty(PROP_CRM_BASE_URL, v.crmBaseUrl);
+  if (v && v.crmApiKey !== undefined) props.setProperty(PROP_CRM_API_KEY, v.crmApiKey);
+  if (v && v.crmCampaignId !== undefined) props.setProperty(PROP_CRM_CAMPAIGN_ID, v.crmCampaignId);
   return true;
 }
 
@@ -408,6 +433,11 @@ function _run(opts) {
         sheet.getRange(sheetRow, COL.sent_at).setValue(ts);
         sheet.getRange(sheetRow, COL.sent_status).setValue("sent");
         sheet.getRange(sheetRow, COL.error).setValue("");
+
+        // Optional CRM trace: upsert Company + Person, create Touchpoint.
+        // Silent — never blocks the send loop on CRM failures.
+        try { _crmSync(email, vars, merged.subject, injected.plain); }
+        catch (e) { Logger.log("CRM sync failed for " + email + ": " + e); }
       } catch (e) {
         sheet.getRange(sheetRow, COL.sent_at).setValue(new Date().toISOString());
         sheet.getRange(sheetRow, COL.sent_status).setValue("error");
@@ -1396,4 +1426,165 @@ function _verifyViaEndpoint(url, email) {
   if (resp.getResponseCode() !== 200) return { status: "error", mx: "http " + resp.getResponseCode() };
   const data = JSON.parse(resp.getContentText());
   return { status: data.status || "error", mx: data.mx || "" };
+}
+
+
+// ---------- CRM trace (optional) ----------
+//
+// If CRM_BASE_URL and CRM_API_KEY are set in Settings, after each successful
+// send the script upserts a Company and a Person on the CRM and creates a
+// Touchpoint (type=EMAIL_SENT, direction=OUTBOUND, outcome=PENDING) attached
+// to the optional Campaign id.
+//
+// Designed for a Twenty CRM REST API (https://twenty.com/) but works with any
+// CRM that exposes /companies, /people, /touchpoints with similar shapes —
+// just adapt the field names if needed.
+//
+// All HTTP calls are wrapped in try/catch and never throw upstream: if the
+// CRM is unreachable, the email still goes out, only the trace is missed.
+// Failures land in Logger.log so you can spot them in Executions.
+
+function _crmGetCfg() {
+  const baseUrl = _getSetting(PROP_CRM_BASE_URL, "");
+  const apiKey = _getSetting(PROP_CRM_API_KEY, "");
+  if (!baseUrl || !apiKey) return null;
+  return {
+    baseUrl: baseUrl.replace(/\/+$/, ""),
+    apiKey: apiKey,
+    campaignId: _getSetting(PROP_CRM_CAMPAIGN_ID, "") || null,
+  };
+}
+
+
+function _crmRequest(cfg, method, path, payload) {
+  const url = cfg.baseUrl + path;
+  const opts = {
+    method: method,
+    headers: { Authorization: "Bearer " + cfg.apiKey, "Content-Type": "application/json" },
+    muteHttpExceptions: true,
+    followRedirects: true,
+  };
+  if (payload) opts.payload = JSON.stringify(payload);
+  const resp = UrlFetchApp.fetch(url, opts);
+  const code = resp.getResponseCode();
+  let body = {};
+  try { body = JSON.parse(resp.getContentText()); } catch (e) { /* not json */ }
+  if (code >= 400) {
+    Logger.log("CRM " + method + " " + path + " → " + code + ": " + resp.getContentText().substring(0, 200));
+    return { _error: code, _body: body };
+  }
+  return body;
+}
+
+
+function _crmDomainFromVars(vars) {
+  // Try website / domain / company columns from the sheet vars.
+  const candidate = String(vars.website || vars.domain || vars.company_domain || "").trim().toLowerCase();
+  if (!candidate) return "";
+  return candidate.replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0];
+}
+
+
+function _crmUpsertCompany(cfg, vars) {
+  const name = String(vars.company || "").trim();
+  const domain = _crmDomainFromVars(vars);
+  if (!name && !domain) return null;
+  // Search by domain first
+  if (domain) {
+    const r = _crmRequest(cfg, "GET", "/companies?filter=domainName.primaryLinkUrl[like]:%25" + encodeURIComponent(domain) + "%25&limit=1");
+    const existing = (r && r.data && r.data.companies) || [];
+    if (existing.length) return existing[0].id;
+  }
+  if (name) {
+    const r = _crmRequest(cfg, "GET", "/companies?filter=name[like]:%25" + encodeURIComponent(name.substring(0, 40)) + "%25&limit=1");
+    const existing = (r && r.data && r.data.companies) || [];
+    if (existing.length) return existing[0].id;
+  }
+  // Create
+  const payload = { name: name || domain };
+  if (domain) payload.domainName = { primaryLinkUrl: vars.website || ("https://" + domain), primaryLinkLabel: "" };
+  const empN = parseInt(String(vars.num_employees || ""), 10);
+  if (!isNaN(empN) && empN > 0) payload.employees = empN;
+  const r = _crmRequest(cfg, "POST", "/companies", payload);
+  if (r._error) return null;
+  return (r.data && r.data.createCompany && r.data.createCompany.id) || null;
+}
+
+
+function _crmUpsertPerson(cfg, email, vars, companyId) {
+  if (!email) return null;
+  const r = _crmRequest(cfg, "GET", "/people?filter=emails.primaryEmail[like]:%25" + encodeURIComponent(email.toLowerCase()) + "%25&limit=1");
+  const existing = (r && r.data && r.data.people) || [];
+  const nowIso = new Date().toISOString();
+  if (existing.length) {
+    const pid = existing[0].id;
+    const upd = { outreachStatus: "CONTACTED_NO_REPLY", lastEmailSentAt: nowIso };
+    if (companyId && !existing[0].companyId) upd.companyId = companyId;
+    _crmRequest(cfg, "PATCH", "/people/" + pid, upd);
+    return pid;
+  }
+  const payload = {
+    name: { firstName: String(vars.first_name || ""), lastName: String(vars.last_name || "") },
+    emails: { primaryEmail: email, additionalEmails: [] },
+    jobTitle: String(vars.title || vars.job_title || ""),
+    outreachStatus: "CONTACTED_NO_REPLY",
+    lastEmailSentAt: nowIso,
+  };
+  if (companyId) payload.companyId = companyId;
+  if (vars.linkedin_url) payload.linkedinLink = { primaryLinkUrl: String(vars.linkedin_url), primaryLinkLabel: "" };
+  if (vars.city) payload.city = String(vars.city);
+  const created = _crmRequest(cfg, "POST", "/people", payload);
+  if (created._error) return null;
+  return (created.data && created.data.createPerson && created.data.createPerson.id) || null;
+}
+
+
+function _crmCreateTouchpoint(cfg, personId, companyId, subject, bodyExcerpt) {
+  const payload = {
+    name: "Email enviat: " + (subject || "").substring(0, 80),
+    touchpointType: "EMAIL_SENT",
+    direction: "OUTBOUND",
+    outcome: "PENDING",
+    subjectLine: (subject || "").substring(0, 200),
+    bodyExcerpt: (bodyExcerpt || "").substring(0, 500),
+    happenedAt: new Date().toISOString(),
+  };
+  if (personId) payload.personId = personId;
+  if (companyId) payload.companyId = companyId;
+  if (cfg.campaignId) payload.campaignId = cfg.campaignId;
+  return _crmRequest(cfg, "POST", "/touchpoints", payload);
+}
+
+
+function _crmSync(email, vars, subject, plainBody) {
+  const cfg = _crmGetCfg();
+  if (!cfg) return;  // CRM not configured
+  const companyId = _crmUpsertCompany(cfg, vars);
+  const personId = _crmUpsertPerson(cfg, email, vars, companyId);
+  if (personId) _crmCreateTouchpoint(cfg, personId, companyId, subject, plainBody);
+}
+
+
+function testCrmConnection() {
+  const ui = SpreadsheetApp.getUi();
+  const cfg = _crmGetCfg();
+  if (!cfg) {
+    ui.alert("CRM not configured", "Set CRM Base URL and API Key in Settings first.", ui.ButtonSet.OK);
+    return;
+  }
+  const r = _crmRequest(cfg, "GET", "/people?limit=1");
+  if (r._error) {
+    ui.alert("CRM connection FAILED", "HTTP " + r._error + ".\nCheck base URL + API key in Settings.", ui.ButtonSet.OK);
+    return;
+  }
+  const count = (r && r.data && r.data.people && r.data.people.length) || 0;
+  let campaignNote = "";
+  if (cfg.campaignId) {
+    const c = _crmRequest(cfg, "GET", "/campaigns/" + cfg.campaignId);
+    const cn = c && c.data && c.data.campaign && c.data.campaign.name;
+    campaignNote = "\nCampaign: " + (cn ? "✅ " + cn : "⚠️  not found (id " + cfg.campaignId + ")");
+  } else {
+    campaignNote = "\nCampaign: not set (touchpoints will be created without campaign link)";
+  }
+  ui.alert("CRM connection OK", "Reachable. Got " + count + " person back from /people probe." + campaignNote, ui.ButtonSet.OK);
 }
