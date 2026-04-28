@@ -24,6 +24,7 @@ A Google Apps Script you paste into your spreadsheet. It turns any Google Sheet 
 - **Settings UI** (no code editing): From name, alias and default test email are entered from a modal.
 - Send yourself a real test email before firing the batch.
 - Send in batches. Random 5-15 s delay between emails.
+- **Optional email verification** before sending: free DNS-MX check built in, plus a Python `smtp_verifier.py` you can self-host for real RCPT TO probes (no Hunter.io subscription needed).
 - **Gmail quota awareness**: batches stop automatically before hitting the daily limit.
 - **Schedule batches** to fire at a specific date/time or every day at a fixed hour.
 - **Runs server-side on Google's infra.** Scheduled batches fire with your laptop closed, Chrome killed, you offline. Zero local dependency.
@@ -167,6 +168,55 @@ Once deployed:
 Caveats:
 - Gmail caches pixel loads via the Google Image Proxy. You'll see the first open; subsequent opens from the same client may be deduplicated.
 - Web App URL needs `Access: Anyone` so recipients' email clients can hit it without being logged in to your Google account. Google's console will show you this as a security warning, approve it — the URL is an obscure UUID and only logs hits.
+
+### 9. Verify emails before sending (optional)
+
+Cleans junk addresses before you fire a batch — fewer bounces means a healthier sender reputation.
+
+Menu: **✅ Verify emails** writes a status into a new `email_verified` column.
+
+Two modes, picked automatically:
+
+**Free DNS mode** (default, zero config):
+- Calls `dns.google` to check that the domain has MX records.
+- Marks: `mx_ok` (domain accepts mail) · `no_mx` (definitely fake) · `error`.
+- Useful to catch typos and dead domains. Doesn't tell you whether the specific address exists.
+
+**SMTP probe mode** (real verification):
+- Deploy the Python script `smtp_verifier.py` shipped in this repo.
+- It opens a TCP connection to the recipient's MX server and does HELO + MAIL FROM + RCPT TO (RFC 5321) without sending any actual email — same technique Hunter.io et al. use, free and self-hosted.
+- Detects catch-all domains (Gmail/Outlook/Zoho) where per-address verification is impossible.
+- Marks: `verified` · `not_found` · `catch_all` · `temp_fail` · `no_mx`.
+
+Setup the SMTP probe:
+
+```bash
+# On a server with port 25 outbound open (Hetzner, DigitalOcean, your VPS):
+python3 smtp_verifier.py --serve --port 8080
+# expose it behind HTTPS — Caddy:
+#   verifier.example.com {
+#     reverse_proxy localhost:8080
+#   }
+```
+
+Then in the Sheet: **🛠️ More → ⚙️ Settings → SMTP verifier endpoint URL** → paste `https://verifier.example.com`. Save.
+
+Now **✅ Verify emails** uses real SMTP probes.
+
+CLI usage (without Apps Script):
+
+```bash
+# Single email:
+python3 smtp_verifier.py john@acme.com
+
+# Batch a CSV (looks for 'email' column):
+python3 smtp_verifier.py --csv leads.csv --out verified.csv
+```
+
+**Caveats:**
+- Most home/office ISPs block outbound port 25 — run from a server.
+- Some MX servers throttle aggressive RCPT TO probes. The script rate-limits 1 req/sec, but heavy use can still get you blocklisted.
+- Catch-all results aren't a "no go" — you can still send, you just couldn't pre-confirm.
 
 ## Configuration reference
 

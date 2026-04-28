@@ -42,6 +42,7 @@ const PROP_INJECT_UNSUB = "SETTING_INJECT_UNSUB";  // "1" = on, "0" = off. Defau
 const PROP_SCHEDULE_LIMIT = "SCHEDULE_LIMIT";
 const PROP_SCHEDULE_DAILY_LIMIT = "SCHEDULE_DAILY_LIMIT";
 const PROP_SCHED_META_PREFIX = "SCHED_META_";       // per-trigger metadata
+const PROP_VERIFIER_URL = "SETTING_VERIFIER_URL";   // optional SMTP verifier endpoint (smtp_verifier.py --serve)
 
 const SUPPRESSION_TAB_NAME = "_Suppression";        // auto-generated unsubscribe list
 
@@ -92,6 +93,8 @@ function onOpen() {
     .addItem("📊 Status", "showStatus")
     .addItem("🔄 Refresh lead statuses", "refreshStatuses")
     .addSeparator()
+    .addItem("✅ Verify emails", "verifyEmails")
+    .addSeparator()
     .addSubMenu(ui.createMenu("🛠️  More")
       .addItem("⚙️  Settings", "openSettings")
       .addItem("🗂  Pick leads sheet", "chooseSheet")
@@ -117,6 +120,7 @@ function openSettings() {
   const replyTo = _getSetting(PROP_REPLY_TO, REPLY_TO);
   const testEmail = _getSetting(PROP_TEST_EMAIL, TEST_EMAIL_DEFAULT);
   const injectUnsub = _getSetting(PROP_INJECT_UNSUB, "1") !== "0";
+  const verifierUrl = _getSetting(PROP_VERIFIER_URL, "");
 
   const esc = function(s) { return String(s || "").replace(/"/g, "&quot;").replace(/</g, "&lt;"); };
 
@@ -142,6 +146,11 @@ function openSettings() {
     '</label>' +
     '<div style="margin-bottom:20px;"></div>' +
 
+    '<label style="display:block;font-size:12px;color:#333;margin-bottom:4px;font-weight:600;">SMTP verifier endpoint URL <span style="color:#888;font-weight:400;">(optional)</span></label>' +
+    '<input id="verifierUrl" type="url" value="' + esc(verifierUrl) + '" placeholder="https://verifier.example.com" style="width:100%;padding:8px;font-size:14px;border:1px solid #ccc;border-radius:4px;margin-bottom:4px;box-sizing:border-box;">' +
+    '<p style="color:#888;margin:0 0 16px 0;font-size:11px;">If you run smtp_verifier.py from this repo as an HTTPS server, paste its base URL. Leave empty to use the free DNS-only check (drops fake domains).</p>' +
+
+
     '<div style="text-align:right;">' +
       '<button onclick="google.script.host.close()" style="padding:8px 14px;margin-right:8px;background:#f5f5f5;border:1px solid #ccc;border-radius:4px;cursor:pointer;">Cancel</button>' +
       '<button onclick="save()" style="padding:8px 14px;background:#DA291C;color:white;border:none;border-radius:4px;cursor:pointer;font-weight:600;">Save</button>' +
@@ -153,13 +162,14 @@ function openSettings() {
     '    fromName: document.getElementById("fromName").value,' +
     '    replyTo: document.getElementById("replyTo").value,' +
     '    testEmail: document.getElementById("testEmail").value,' +
-    '    injectUnsub: document.getElementById("injectUnsub").checked ? "1" : "0"' +
+    '    injectUnsub: document.getElementById("injectUnsub").checked ? "1" : "0",' +
+    '    verifierUrl: document.getElementById("verifierUrl").value' +
     '  };' +
     '  google.script.run.withSuccessHandler(function(){ google.script.host.close(); }).saveSettings(v);' +
     '}' +
     '</script>' +
     '</div>'
-  ).setWidth(520).setHeight(440);
+  ).setWidth(520).setHeight(560);
   SpreadsheetApp.getUi().showModalDialog(html, "Settings");
 }
 
@@ -169,6 +179,7 @@ function saveSettings(v) {
   if (v && v.replyTo !== undefined) props.setProperty(PROP_REPLY_TO, v.replyTo);
   if (v && v.testEmail !== undefined) props.setProperty(PROP_TEST_EMAIL, v.testEmail);
   if (v && v.injectUnsub !== undefined) props.setProperty(PROP_INJECT_UNSUB, v.injectUnsub);
+  if (v && v.verifierUrl !== undefined) props.setProperty(PROP_VERIFIER_URL, v.verifierUrl);
   return true;
 }
 
@@ -1260,4 +1271,129 @@ function checkReplies() {
   if (!sheet) { SpreadsheetApp.getUi().alert("No leads sheet picked."); return; }
   const marked = _scanReplies(sheet);
   SpreadsheetApp.getUi().alert("Replies detected: " + marked + "\nRows updated in column " + COL.replied_at + " (replied_at).");
+}
+
+
+// ---------- Email verification ----------
+//
+// verifyEmails() iterates over rows in the leads sheet and writes a verifier
+// status to a column called "email_verified" (auto-created if missing).
+//
+// Two modes:
+//   1. Default (zero-config, free): DNS MX check via dns.google. Marks rows as
+//      "no_mx" (domain has no mail server, definitely a fake email) or "mx_ok"
+//      (domain accepts mail; existence of the specific address NOT verified).
+//      Useful to drop obvious junk before sending — but most domains will pass.
+//
+//   2. SMTP probe (Settings → Verifier URL): if you run smtp_verifier.py
+//      (shipped in this repo) as an HTTPS server, paste its URL into Settings.
+//      verifyEmails() then calls that endpoint per row and gets the real
+//      RCPT TO result: "verified", "not_found", "catch_all", "temp_fail".
+//      Setup: see README "Email verification" section.
+//
+// Catch-all detection: providers like Gmail/Outlook/Yahoo accept any RCPT TO,
+// so per-address verification is impossible. Marked as "catch_all" → still
+// safe to send (just means we can't pre-confirm).
+//
+// Rate-limited to 1 request/second to stay polite to MX servers + dns.google.
+
+const VERIFIER_HEADER = "email_verified";
+
+function verifyEmails() {
+  const ui = SpreadsheetApp.getUi();
+  const sheet = _getLeadsSheet();
+  if (!sheet) { ui.alert("No leads sheet picked. Use Setup first."); return; }
+
+  const verifierUrl = _getSetting(PROP_VERIFIER_URL, "");
+  const mode = verifierUrl ? "SMTP probe (via " + verifierUrl + ")" : "DNS MX check (free, basic)";
+  const ans = ui.alert(
+    "Verify emails",
+    "About to verify all leads with no email_verified value yet.\n\n" +
+    "Mode: " + mode + "\n\n" +
+    "Tip: for real SMTP RCPT TO checks, deploy smtp_verifier.py from this repo and paste its URL in Settings.\n\n" +
+    "Continue?",
+    ui.ButtonSet.YES_NO
+  );
+  if (ans !== ui.Button.YES) return;
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) { ui.alert("No leads."); return; }
+
+  // Find or create the email_verified column.
+  const headersRow = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  let verifyCol = headersRow.indexOf(VERIFIER_HEADER) + 1;
+  if (!verifyCol) {
+    verifyCol = sheet.getLastColumn() + 1;
+    sheet.getRange(1, verifyCol).setValue(VERIFIER_HEADER);
+  }
+
+  const emails = sheet.getRange(2, COL.email, lastRow - 1, 1).getValues();
+  const existing = sheet.getRange(2, verifyCol, lastRow - 1, 1).getValues();
+  let processed = 0;
+  let stats = { verified: 0, not_found: 0, catch_all: 0, no_mx: 0, mx_ok: 0, error: 0, skipped: 0 };
+
+  for (let i = 0; i < emails.length; i++) {
+    const email = String(emails[i][0] || "").trim().toLowerCase();
+    const already = String(existing[i][0] || "").trim();
+    if (!email || already) { stats.skipped++; continue; }
+    let status, mx = "";
+    try {
+      if (verifierUrl) {
+        const r = _verifyViaEndpoint(verifierUrl, email);
+        status = r.status || "error";
+        mx = r.mx || "";
+      } else {
+        const r = _verifyViaDns(email);
+        status = r.status;
+        mx = r.mx || "";
+      }
+    } catch (e) {
+      status = "error";
+      mx = String(e).slice(0, 80);
+    }
+    sheet.getRange(i + 2, verifyCol).setValue(status + (mx ? " (" + mx + ")" : ""));
+    stats[status] = (stats[status] || 0) + 1;
+    processed++;
+    Utilities.sleep(1000);  // 1 req/s — polite to dns.google and MX servers
+  }
+
+  const summary = Object.entries(stats).filter(([, v]) => v > 0).map(([k, v]) => k + ": " + v).join(" · ");
+  ui.alert("Verified " + processed + " emails.\n\n" + summary);
+}
+
+
+function _verifyViaDns(email) {
+  // dns.google JSON API: https://dns.google/resolve?name=DOMAIN&type=MX
+  const at = email.indexOf("@");
+  if (at < 0) return { status: "invalid_format" };
+  const domain = email.slice(at + 1);
+  const url = "https://dns.google/resolve?name=" + encodeURIComponent(domain) + "&type=MX";
+  let resp;
+  try {
+    resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
+  } catch (e) {
+    return { status: "error", mx: String(e).slice(0, 60) };
+  }
+  if (resp.getResponseCode() !== 200) return { status: "error", mx: "dns http " + resp.getResponseCode() };
+  const data = JSON.parse(resp.getContentText());
+  const answers = (data.Answer || []).filter(a => a.type === 15);
+  if (!answers.length) return { status: "no_mx" };
+  // Sort by priority and take the first
+  answers.sort(function(a, b) {
+    const pa = parseInt(String(a.data).split(" ")[0], 10) || 0;
+    const pb = parseInt(String(b.data).split(" ")[0], 10) || 0;
+    return pa - pb;
+  });
+  const mx = String(answers[0].data).split(" ").pop().replace(/\.$/, "");
+  return { status: "mx_ok", mx: mx };
+}
+
+
+function _verifyViaEndpoint(url, email) {
+  // Calls smtp_verifier.py /verify?email=...
+  const u = url.replace(/\/+$/, "") + "/verify?email=" + encodeURIComponent(email);
+  const resp = UrlFetchApp.fetch(u, { muteHttpExceptions: true, followRedirects: true });
+  if (resp.getResponseCode() !== 200) return { status: "error", mx: "http " + resp.getResponseCode() };
+  const data = JSON.parse(resp.getContentText());
+  return { status: data.status || "error", mx: data.mx || "" };
 }
