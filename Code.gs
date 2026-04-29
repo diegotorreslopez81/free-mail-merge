@@ -27,9 +27,9 @@ const SHEET_NAME_FALLBACK = "Leads";                // fallback tab name if none
 // ---------------------------------------------------------------------------------------
 
 const SCHEDULE_TAB_NAME = "_Schedule";              // auto-generated, read-only tab
-const BATCH_SIZE_DEFAULT = 30;                      // Apps Script has a 6-min timeout
-const DELAY_MIN_MS = 5000;                          // 5 s random delay floor
-const DELAY_MAX_MS = 15000;                         // 15 s random delay ceiling
+const BATCH_SIZE_DEFAULT = 50;                      // safe per-run before the 5-min auto-resume kicks in
+const DELAY_MIN_MS = 3000;                          // 3 s random delay floor
+const DELAY_MAX_MS = 7000;                          // 7 s random delay ceiling — fits ~60 emails per 5-min run
 const QUOTA_SAFETY_MARGIN = 3;                      // stop a batch when this many quota slots remain
 
 // DocumentProperties keys (never rename — would drop user settings on update)
@@ -46,6 +46,10 @@ const PROP_VERIFIER_URL = "SETTING_VERIFIER_URL";   // optional SMTP verifier en
 const PROP_CRM_BASE_URL = "SETTING_CRM_BASE_URL";   // optional CRM REST API base, e.g. "https://crm.infinitelabs.co/rest"
 const PROP_CRM_API_KEY = "SETTING_CRM_API_KEY";     // CRM bearer token
 const PROP_CRM_CAMPAIGN_ID = "SETTING_CRM_CAMPAIGN_ID";  // optional campaign id to attach touchpoints to
+const PROP_BATCH_REMAINING = "BATCH_REMAINING";          // pending total when a batch is auto-resuming
+const PROP_BATCH_RESUME_TRIGGER = "BATCH_RESUME_TRIGGER";// id of the time-trigger that will continue a batch
+
+const RUN_SOFT_TIMEOUT_MS = 5 * 60 * 1000;  // 5 min — schedule resume before Apps Script kills us at 6 min
 
 const SUPPRESSION_TAB_NAME = "_Suppression";        // auto-generated unsubscribe list
 
@@ -342,10 +346,38 @@ function dryRun() {
 
 function sendBatch() {
   const ui = SpreadsheetApp.getUi();
-  const r = ui.prompt("Send batch", "How many emails? (recommended max 30-40 per run, Apps Script has a 6-min cap)", ui.ButtonSet.OK_CANCEL);
+  const r = ui.prompt("Send batch", "How many emails to send in total?\n\nIf the number exceeds what fits in a single 6-min Apps Script run, the script will automatically schedule continuation runs (every minute) until the full batch is sent.", ui.ButtonSet.OK_CANCEL);
   if (r.getSelectedButton() !== ui.Button.OK) return;
   const limit = parseInt(r.getResponseText(), 10) || BATCH_SIZE_DEFAULT;
-  _run({ dryRun: false, limit });
+  // Save remaining limit so the auto-resume trigger knows how many to keep going.
+  PropertiesService.getDocumentProperties().setProperty(PROP_BATCH_REMAINING, String(limit));
+  _run({ dryRun: false, limit, autoResume: true });
+}
+
+
+// Called by an Apps Script time-based trigger when a batch hits the 6-min cap
+// before draining its remaining limit. Reads the leftover from DocumentProperties
+// and continues until done.
+function _scheduledResumeSend() {
+  // Always clean up our own trigger to avoid orphan triggers.
+  const triggerId = PropertiesService.getDocumentProperties().getProperty(PROP_BATCH_RESUME_TRIGGER);
+  if (triggerId) {
+    const triggers = ScriptApp.getProjectTriggers();
+    for (let i = 0; i < triggers.length; i++) {
+      if (triggers[i].getUniqueId() === triggerId) {
+        try { ScriptApp.deleteTrigger(triggers[i]); } catch (e) { /* ignore */ }
+        break;
+      }
+    }
+    PropertiesService.getDocumentProperties().deleteProperty(PROP_BATCH_RESUME_TRIGGER);
+  }
+  const remaining = parseInt(PropertiesService.getDocumentProperties().getProperty(PROP_BATCH_REMAINING) || "0", 10);
+  if (remaining <= 0) {
+    Logger.log("Auto-resume: nothing left to send.");
+    return;
+  }
+  Logger.log("Auto-resume: continuing with remaining=" + remaining);
+  _run({ dryRun: false, limit: remaining, autoResume: true, silent: true });
 }
 
 // ---------- Core ----------
@@ -386,7 +418,9 @@ function _run(opts) {
   let sent = 0;
   let skipped_quota = false;
   let skipped_suppressed = 0;
+  let timed_out = false;
   const errors = [];
+  const runStartMs = new Date().getTime();
 
   // Quota awareness: stop before we get pushed off the cliff.
   let remaining = Infinity;
@@ -404,6 +438,13 @@ function _run(opts) {
 
     if (!opts.dryRun && remaining <= QUOTA_SAFETY_MARGIN) {
       skipped_quota = true;
+      break;
+    }
+
+    // Auto-resume: if we're getting close to the 6-min Apps Script timeout,
+    // schedule a continuation in 1 min and exit cleanly.
+    if (!opts.dryRun && opts.autoResume && (new Date().getTime() - runStartMs) > RUN_SOFT_TIMEOUT_MS) {
+      timed_out = true;
       break;
     }
 
@@ -451,6 +492,30 @@ function _run(opts) {
     sent++;
   }
 
+  // Auto-resume bookkeeping: update remaining + schedule next run if we hit the soft cap.
+  if (!opts.dryRun && opts.autoResume) {
+    const newRemaining = Math.max(0, opts.limit - sent);
+    if (newRemaining > 0 && (timed_out || sent >= opts.limit) && !skipped_quota) {
+      // Only re-schedule if we still have unsent leads in the sheet (vs we drained the limit).
+      const stillPending = (timed_out && newRemaining > 0);
+      if (stillPending) {
+        PropertiesService.getDocumentProperties().setProperty(PROP_BATCH_REMAINING, String(newRemaining));
+        try {
+          const trigger = ScriptApp.newTrigger("_scheduledResumeSend").timeBased().after(60 * 1000).create();
+          PropertiesService.getDocumentProperties().setProperty(PROP_BATCH_RESUME_TRIGGER, trigger.getUniqueId());
+          Logger.log("Soft-timeout: scheduled resume in 60s, " + newRemaining + " left.");
+        } catch (e) {
+          Logger.log("Could not schedule resume trigger: " + e);
+        }
+      } else {
+        PropertiesService.getDocumentProperties().deleteProperty(PROP_BATCH_REMAINING);
+      }
+    } else {
+      // Done. Clean up any leftover bookkeeping.
+      PropertiesService.getDocumentProperties().deleteProperty(PROP_BATCH_REMAINING);
+    }
+  }
+
   let msg;
   if (opts.dryRun) {
     msg = "Dry run OK. " + sent + " emails rendered. Check Executions → Logs.";
@@ -459,6 +524,7 @@ function _run(opts) {
     if (errors.length) msg += "\nErrors: " + errors.length + " (see 'error' column)";
     if (skipped_suppressed) msg += "\nSkipped (suppression list): " + skipped_suppressed;
     if (skipped_quota) msg += "\n\n⚠️ Stopped early: Gmail daily quota reached (" + QUOTA_SAFETY_MARGIN + " slot safety margin). Remaining: " + remaining + ".";
+    if (timed_out) msg += "\n\n⏳ Reached the 5-min soft cap. Auto-resume scheduled in 60s — the rest of the batch (" + Math.max(0, opts.limit - sent) + " more) will go out automatically without you touching anything.";
     if (!webAppUrl) msg += "\n\nℹ️  Web app not deployed. Emails went out WITHOUT tracking (no pixel, no unsubscribe link).";
   }
   if (opts.silent) { Logger.log(msg); } else { SpreadsheetApp.getUi().alert(msg); }
