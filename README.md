@@ -14,6 +14,27 @@
 ![No dependencies](https://img.shields.io/badge/dependencies-0-green)
 ![Cost](https://img.shields.io/badge/cost-0%E2%82%AC-brightgreen)
 
+## 🎁 Quick start (3 minutes, no code)
+
+The fastest way: copy the ready-made template Sheet. The script comes with it.
+
+1. **Open the template**: <https://docs.google.com/spreadsheets/d/1ds0WN5JCaVY1TOreECJnvWyY_MyWeNu24xFRZA3isuE/edit>
+2. **File → Make a copy**. Name it whatever you want.
+3. In your copy, wait 10 seconds. A new menu **"✉️ Free Mail Merge"** appears at the top.
+4. Click **✉️ Free Mail Merge → 🚀 Setup**. A checklist walks you through:
+   - **Settings**: your From name, Reply-To alias, default test email.
+   - **Leads sheet**: pick the `Leads` tab.
+   - **Template draft**: pick a Gmail draft you've saved (use placeholders like `{{first_name}}`, `{{company}}`).
+   - **Tracking web app** _(optional)_: enables opens, clicks, unsubscribe.
+5. Add your leads to the `Leads` tab. Column A is `email`, columns B-L are whatever you want.
+6. **✉️ Free Mail Merge → 📨 Send test email** to verify, then **📧 Send batch** or **⏰ Schedule daily**.
+
+That's it. No code editing, no Apps Script paste, no install.
+
+> 💡 **For developers / power users**: scroll to [Manual install](#manual-install-2-minutes) if you'd rather paste the source into your own Sheet's Apps Script.
+
+---
+
 ## What this is
 
 A Google Apps Script you paste into your spreadsheet. It turns any Google Sheet into a mail merge tool:
@@ -43,7 +64,9 @@ YAMM charges €60/year for anything beyond 20 emails/day. I needed to send 450 
 
 ![Demo GIF](screenshots/demo.gif)
 
-## Install (2 minutes)
+## Manual install (2 minutes)
+
+If you prefer to paste the source into your own Sheet (instead of copying the template above):
 
 1. Open your Google Sheet.
 2. **Extensions → Apps Script**.
@@ -56,7 +79,7 @@ YAMM charges €60/year for anything beyond 20 emails/day. I needed to send 450 
    - **Template draft**: which Gmail draft to use.
    - **Tracking web app** _(optional)_: enables opens, clicks, and an auto-injected unsubscribe link. One 30-second deploy, see [section 8](#8-track-opens-clicks-and-unsubscribes) below.
 
-No code editing needed. Everything is configured from the menu and stored in the spreadsheet.
+No code editing needed beyond the paste. All settings are entered from the menu and stored in the spreadsheet.
 
 ## Sheet layout
 
